@@ -46,6 +46,9 @@ void clearMotionFault() {
 
 
 bool calibrated = false, sensorOK = false, moving = false;
+bool manualJog = false;
+int jogDirection = 0;
+uint32_t jogAt = 0, jogStarted = 0, jogStopped = 0;
 uint16_t rawAngle = 0, zeroAngle = 0;
 float angle = 0, target = 0, initialError = 0, lastProgressAngle = 0;
 // SPEED in deg/s; ACCEL in deg/s^2. 12 deg/s equals 2 rpm.
@@ -98,6 +101,8 @@ void flapOff() {
 }
 
 void stopFlap() {
+  if (manualJog) jogStopped = millis();
+  manualJog = false;
   flapOff();
   moving = false;
   settling = correcting = correctionPulse = false;
@@ -158,6 +163,11 @@ void failFlap(uint16_t reason, const char* message, const char* hint) {
 
 void updateFlap(uint32_t now) {
   if (!moving) return;
+  if (manualJog) {
+    // Open-loop bench test: deliberately independent of encoder and saved zero.
+    if (now - jogAt >= 500 || now - jogStarted >= 10000) stopFlap();
+    return;
+  }
   if (!sensorOK) {
     trackingReady = false;
     failFlap(encoderFault, encoderFaultText(), "Sprawdz SDA GPIO17, SCL GPIO5, zasilanie 3,3 V, mase i ustawienie magnesu.");
