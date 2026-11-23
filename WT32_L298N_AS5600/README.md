@@ -1,6 +1,6 @@
 # WT32-ETH01 — L298N, klapka AS5600 i rynna
 
-Firmware v3.0 dla WT32-ETH01 z LAN8720. Klapka jest sterowana pierwszym kanalem L298N, a silownik rynny drugim. AS5600 mierzy absolutny kat klapki. IP Ethernet 192.168.1.13, maska 255.255.255.0, brama 192.168.1.1. Wi-Fi pobiera osobny adres przez DHCP.
+Firmware v3.1 dla WT32-ETH01 z LAN8720. Klapka jest sterowana pierwszym kanalem L298N, a silownik rynny drugim. AS5600 mierzy absolutny kat klapki. IP Ethernet 192.168.1.13, maska 255.255.255.0, brama 192.168.1.1. Wi-Fi pobiera osobny adres przez DHCP.
 
 ## Podlaczenie
 
@@ -54,7 +54,7 @@ Port 502, Unit ID 1. Obslugiwane FC03, FC04, FC06 i FC16. Maksymalnie 3 klientow
 | 2 | R | Aktualne PWM rynny 0..1000 |
 | 3 | R | Aktualny kierunek rynny |
 | 4 | R | Rynna odblokowana po STOP, 0/1 |
-| 5 | R | Wersja firmware 300 |
+| 5 | R | Wersja firmware 310 |
 | 6 | RW | Kat zadany klapki 0..3600, jednostka 0,1 stopnia |
 | 7 | W | Polecenie klapki 0 STOP, 1 jedz do rejestru 6, 2 ZERO, 3 zapisz SPEED i ACCEL |
 | 8 | R | Aktualny kat klapki 0..3599, jednostka 0,1 stopnia |
@@ -83,3 +83,11 @@ Dostepne jest takze ArduinoOTA z Arduino IDE, host suszarnia-klapka, to samo has
 ## USB
 
 115200, Nowa linia. Dostepne STATUS, ZERO, kat jako liczba, SPEED 12, ACCEL 12, SAVE, STOP. SAVE zapisuje parametry do NVS. USB sluzy do testow; polecenie ruchu z USB ma wlasny limit czasu i nie wymaga sieciowego heartbeat.
+
+## Diagnostyka na stronie w wersji 3.1
+
+Strona pokazuje opis przyczyny zatrzymania, wskazowke co sprawdzic, kat i cel w chwili bledu oraz zadane PWM przed zatrzymaniem. Rejestr 12 zachowuje dotychczasowe kategorie 0..3. Szczegolowy kod i tekst sa dostepne w /api/status. STOP zachowuje opis do odczytania; nowe przyjete polecenie ruchu lub poprawny zapis ZERO kasuja poprzedni blad. Informacja o przyczynie jest przechowywana do restartu.
+
+Kody szczegolowe: 1 komunikacja I2C, 2 brak magnesu, 3 zbyt slabe pole, 4 zbyt silne pole, 5 przeciwny kierunek, 6 brak postepu 1,5 s, 7 limit czasu dojazdu, 8 nieosiagnieta tolerancja po korektach, 9 utrata sieci, 10 brak heartbeat, 11 zamkniecie sesji Modbus, 12 blad zapisu zera, 13 blad PWM, 14 blad zadania sterowania.
+
+Komunikat o braku ruchu opisuje obserwacje enkodera i polecenie PWM. Sterownik nie mierzy napiecia ani pradu silnika, wiec podane przyczyny elektryczne sa wskazowkami do sprawdzenia. Po aktualizacji odswiez strone przez Ctrl+F5 i ponow probe, aby otrzymac nowy szczegolowy blad.
