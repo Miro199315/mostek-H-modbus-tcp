@@ -61,7 +61,7 @@ Port 502, Unit ID 1. Obslugiwane FC03, FC04, FC06 i FC16. Maksymalnie 3 klientow
 | 9 | R | Flagi klapki, opis nizej |
 | 10 | RW | SPEED 10..120, jednostka 0,1 stopnia/s |
 | 11 | RW | ACCEL i hamowanie 10..1200, jednostka 0,1 stopnia/s^2 |
-| 12 | R | Blad klapki 0 brak, 1 blad ruchu/czujnika, 2 utrata sterowania |
+| 12 | R | Blad klapki 0 brak, 1 blad ruchu/czujnika, 2 utrata sterowania, 3 blad zapisu zera |
 | 13 | RW | Heartbeat klapki, dowolna wartosc z tej samej sesji TCP co polecenie jazdy |
 | 14 | W | 1 zatrzymuje oba napedy i blokuje rynne do nowego STOP |
 | 15 | R | Surowy odczyt AS5600 0..4095 |
