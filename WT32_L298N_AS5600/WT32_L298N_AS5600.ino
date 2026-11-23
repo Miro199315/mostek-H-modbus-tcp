@@ -195,12 +195,12 @@ uint8_t applyRegisters(unsigned index, uint16_t address, uint16_t count, const u
   uint16_t direction = liftCommand, pwm = liftPwm, destination = stagedTarget;
   uint16_t speed = lroundf(maxSpeed * 10), accel = lroundf(acceleration * 10);
   uint16_t command = 0, globalStop = 0, heartbeat = heartbeatSequence;
-  bool directionWritten = false, heartbeatWritten = false;
+  bool directionWritten = false, pwmWritten = false, heartbeatWritten = false;
   for (uint16_t i = 0; i < count; ++i) {
     const uint16_t value = values[i];
     switch (address + i) {
       case 0: if (value > 2) return 3; direction = value; directionWritten = true; break;
-      case 1: if (value > 1000) return 3; pwm = value; break;
+      case 1: if (value > 1000) return 3; pwm = value; pwmWritten = true; break;
       case 6: if (value > 3600) return 3; destination = value; break;
       case 7: if (value > 3) return 3; command = value; break;
       case 10: if (value < 10 || value > 120) return 3; speed = value; break;
@@ -213,6 +213,7 @@ uint8_t applyRegisters(unsigned index, uint16_t address, uint16_t count, const u
   if (globalStop) { haltAll(); return 0; }
   if (maintenance || !driverReady) return 6;
   if (directionWritten && direction && (!liftArmed || liftOwner != int(index))) return 3;
+  if (pwmWritten && !directionWritten && liftCommand && liftOwner != int(index)) return 6;
   if ((speed != lroundf(maxSpeed * 10) || accel != lroundf(acceleration * 10)) && moving) return 6;
   if (command == 1 && (moving || !sensorOK || !calibrated)) return 6;
   if (command == 2 && (moving || !sensorOK || liftCommand || (directionWritten && direction))) return 6;
@@ -228,7 +229,7 @@ uint8_t applyRegisters(unsigned index, uint16_t address, uint16_t count, const u
   if (command == 2) {
     char zero[] = "ZERO";
     motionCommand(zero);
-    if (!calibrated || !sensorOK) { maxSpeed = oldSpeed; acceleration = oldAccel; return 4; }
+    if (!calibrated || !sensorOK || motionFault == 3) { maxSpeed = oldSpeed; acceleration = oldAccel; return 4; }
   }
   if (command == 3 && !saveTuning()) { maxSpeed = oldSpeed; acceleration = oldAccel; return 4; }
   // A write of 0 to register 7 is an explicit flap STOP.
@@ -467,7 +468,7 @@ void setupWeb() {
       } else if (action == "zero" && !moving && !liftCommand) {
         char zero[] = "ZERO";
         motionCommand(zero);
-        ok = sensorOK && calibrated;
+        ok = sensorOK && calibrated && motionFault != 3;
       }
     }
     unlockMotion();
