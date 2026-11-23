@@ -29,7 +29,7 @@
 #define DRYER_WIFI_NETWORKS "[]"
 #endif
 
-constexpr uint16_t FIRMWARE_VERSION = 320;
+constexpr uint16_t FIRMWARE_VERSION = 330;
 constexpr unsigned CLIENT_COUNT = 3;
 constexpr int NO_OWNER = -1, WEB_OWNER = 100, USB_OWNER = 101;
 constexpr uint32_t LEASE_MS = 1500;
@@ -389,17 +389,22 @@ void endFailedMaintenance() {
 const char CONTROL_PAGE[] PROGMEM = R"html(<!doctype html><html lang="pl"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Klapka suszarni</title>
 <style>body{font:17px system-ui;margin:24px auto;padding:0 16px;max-width:600px;background:#f5f6f4;color:#183426}section{background:white;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,button{font:inherit;padding:10px;box-sizing:border-box;max-width:100%}input{width:150px}button{cursor:pointer;margin:4px;background:#1c6042;color:white;border:0;border-radius:6px}#stop{background:#ad302a}#state{white-space:pre-line}#message{min-height:28px}#faultBox{background:#fff0ed;border:2px solid #ad302a;color:#76241d;padding:16px;border-radius:8px;margin-top:16px}#faultBox p{margin:8px 0}#faultDetails{font-size:14px}a{color:#1c6042}</style>
-<h1>Klapka suszarni <small>v3.2</small></h1><section><div id="state">Laczenie...</div>
+<h1>Klapka suszarni <small>v3.3</small></h1><section><div id="state">Laczenie...</div>
 <div id="faultBox" role="alert" hidden><strong id="faultText"></strong><p id="faultHint"></p><p id="faultDetails"></p></div></section>
 <section><label>Kat zadany [°] <input id="angle" type="number" min="0" max="360" step="0.1" value="30"></label>
 <button onclick="act('move')">Ustaw kat</button><button id="stop" onclick="act('stop')">STOP obu napedow</button>
-<label>Predkosc [°/s] <input id="speed" type="number" min="1" max="12" step="0.1" value="12"></label>
+<div hidden><label>Predkosc [°/s] <input id="speed" type="number" min="1" max="12" step="0.1" value="12"></label>
 <label>Przyspieszenie i hamowanie [°/s²] <input id="accel" type="number" min="1" max="120" step="0.1" value="12"></label>
 <button onclick="act('tune')">Zastosuj parametry</button><button onclick="act('save')">Zapisz parametry</button>
-<p>Ustaw mechanizm w pozycji zerowej przed zapisaniem odniesienia.</p><button onclick="act('zero')">Zapisz aktualna pozycje jako zero</button>
-<h2>Test silnika bez enkodera</h2>
+</div><p>Jazda od razu na 100% mocy. Przy celu korekty impulsami 100%.</p><p>Ustaw mechanizm w pozycji zerowej przed zapisaniem odniesienia.</p><button onclick="act('zero')">Zapisz aktualna pozycje jako zero</button>
+<h2>Kalibracja napedu — pelna moc</h2>
+<p>Enkoder wymagany. Zapewnij co najmniej 8° wolnego ruchu w wybranym kierunku. Test wykona 3 impulsy po 150 ms i zapisze czas ruchu na stopien oraz dobieg. Wykonaj osobno dla obu kierunkow.</p>
+<button onclick="act('calleft')">Kalibruj LEWO</button>
+<button onclick="act('calright')">Kalibruj PRAWO</button>
+<p id="calibration"></p>
+<h2>Test silnika bez enkodera — 100%</h2>
 <p>Przytrzymaj przycisk. Bez kontroli kata i krancowek; maksymalnie 10 s na nacisniecie.</p>
-<label>Moc [%] <input id="power" type="number" min="1" max="100" value="100"></label>
+<label hidden>Moc [%] <input id="power" type="number" min="1" max="100" value="100"></label>
 <button class="jog" data-direction="-1" style="touch-action:none">Przytrzymaj: LEWO</button>
 <button class="jog" data-direction="1" style="touch-action:none">Przytrzymaj: PRAWO</button>
 <p id="message" role="status"></p></section><p><a href="/update">Aktualizacja programu OTA</a></p>
@@ -427,7 +432,7 @@ async function post(action, extra = {}) {
 async function act(action) {
   try {
     document.querySelector('#message').textContent = await post(action);
-    if (action === 'move') alive = true;
+    if (['move', 'calleft', 'calright'].includes(action)) alive = true;
     if (action === 'stop') alive = false;
     await poll();
   } catch (error) {
@@ -455,6 +460,8 @@ async function poll() {
       `Rynna: ${state.lift}`,
       `Ethernet: ${state.eth} | Wi-Fi: ${state.wifi}`
     ].join('\n');
+    document.querySelector('#calibration').textContent = state.calibrationText +
+      ' | LEWO: ' + state.msLeft.toFixed(1) + ' ms/° | PRAWO: ' + state.msRight.toFixed(1) + ' ms/°';
     document.querySelector('#faultBox').hidden = !state.fault;
     document.querySelector('#faultText').textContent = state.faultText;
     document.querySelector('#faultHint').textContent = state.faultHint;
@@ -538,7 +545,11 @@ void setupWeb() {
     state["calibrated"] = calibrated;
     state["moving"] = moving;
     state["manual"] = manualJog;
-    state["version"] = "3.2";
+    state["calibrating"] = calibratingMotor;
+    state["calibrationText"] = calibrationText;
+    state["msLeft"] = msPerDegree[0];
+    state["msRight"] = msPerDegree[1];
+    state["version"] = "3.3";
     state["fault"] = motionFault;
     state["faultReason"] = motionFaultReason;
     state["faultText"] = motionFaultText;
@@ -589,6 +600,27 @@ void setupWeb() {
       if (manualJog && flapOwner == WEB_OWNER) { stopFlap(); flapOwner = NO_OWNER; }
       responseText = "Test zatrzymany.";
       ok = true;
+    } else if (action == "calleft" || action == "calright") {
+      if (moving || liftCommand) responseText = "Najpierw STOP obu napedow.";
+      else if (!sensorOK) responseText = encoderFaultText();
+      else {
+        clearMotionFault();
+        calDirection = action == "calright" ? 1 : -1;
+        calStart = position;
+        calOffPosition = position;
+        calCoast = 0;
+        calPulses = 0;
+        calPowered = true;
+        calPhaseAt = moveStarted = millis();
+        calibratingMotor = moving = true;
+        calibrationText = "Kalibracja: 3 impulsy po 150 ms przy mocy 100%.";
+        flapOwner = WEB_OWNER;
+        flapUsesEthernet = web.client().localIP() == ethernetIP;
+        flapAt = millis();
+        driveFull(calDirection);
+        responseText = calibrationText;
+        ok = true;
+      }
     } else if (action == "jog") {
       float direction = 0, power = 0;
       const bool validJog = parseNumber(web.arg("direction"), direction) &&
@@ -611,7 +643,7 @@ void setupWeb() {
         flapUsesEthernet = web.client().localIP() == ethernetIP;
         jogAt = flapAt = millis();
         const bool forward = (direction > 0) != MOTOR_REVERSE;
-        const int pwm = int(lroundf(power * 255 / 100));
+        const int pwm = 255;
         analogWrite(forward ? FLAP_B : FLAP_A, 0);
         analogWrite(forward ? FLAP_A : FLAP_B, pwm);
         flapOutputPwm = pwm;
@@ -791,6 +823,18 @@ void setup() {
     maxSpeed = tuning[0];
     acceleration = tuning[1];
   }
+  float motorcal[4];
+  if (settings.getBytes("motorcal", motorcal, sizeof(motorcal)) == sizeof(motorcal)) {
+    bool valid = true;
+    for (int i = 0; i < 4; ++i) if (!isfinite(motorcal[i])) valid = false;
+    if (valid && motorcal[0] >= 5 && motorcal[0] <= 5000 &&
+        motorcal[1] >= 5 && motorcal[1] <= 5000 &&
+        motorcal[2] >= 0 && motorcal[2] <= 3 && motorcal[3] >= 0 && motorcal[3] <= 3) {
+      msPerDegree[0] = motorcal[0]; msPerDegree[1] = motorcal[1];
+      stopLead[0] = motorcal[2]; stopLead[1] = motorcal[3];
+      calibrationText = "Wczytano zapisana kalibracje napedu.";
+    }
+  }
   sensorOK = readEncoder();
   driverReady = pwmOK;
   if (!pwmOK) recordMotionFault(1, 13, "Nie udalo sie uruchomic wyjsc PWM.", "Sprawdz wybor plytki i konfiguracje GPIO. Napedy pozostaja zatrzymane.");
@@ -813,7 +857,7 @@ void setup() {
     ArduinoOTA.onEnd([]() { Serial.println("Arduino OTA: gotowe."); });
     ArduinoOTA.onError([](ota_error_t) { endFailedMaintenance(); Serial.println("Arduino OTA: blad."); });
   }
-  Serial.println("WT32 L298N + AS5600 v3.2 / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
+  Serial.println("WT32 L298N + AS5600 v3.3 / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
   Serial.println("AS5600 SDA17 SCL5; L298N IN1=32 IN2=33 IN3=14 IN4=4.");
   Serial.println("Nowy ESP wymaga ZERO. USB 115200: kat, ZERO, SPEED, ACCEL, SAVE, STOP, STATUS.");
 }
