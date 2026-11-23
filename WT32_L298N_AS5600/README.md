@@ -101,3 +101,18 @@ Brak odnowienia polecenia przez 500 ms zatrzymuje silnik; limit pojedynczego tes
 Przed zmiana kierunku obowiazuje przerwa 700 ms.
 OTA oraz globalny STOP zatrzymuja takze test. Pozycjonowanie nadal wymaga enkodera.
 Pinout bez zmian. Wersja w rejestrze 5: 320.
+
+
+## v3.3 — pelna moc i kalibracja impulsow
+Klapka od razu jedzie z PWM 255 (100%), bez rampy. Przy celu wylacza naped,
+czeka 700 ms i koryguje pelna moca przez impulsy 5–100 ms.
+Kalibruj LEWO/PRAWO na stronie: wymagany sprawny AS5600 i minimum 8 stopni
+wolnego ruchu w kierunku testu. Trzy impulsy po 150 ms, z przerwami 700 ms,
+mierza ruch i dobieg. Wynik danego kierunku zapisuje sie w NVS.
+Zapisane ZERO nie zmienia sie. Kalibracja nie wymaga zapisanego ZERO.
+Utrata enkodera/heartbeat i STOP przerywaja kalibracje. Nie ma kontroli krancowek.
+Reczny test bez enkodera tez zawsze 100%. Tolerancja 0,1 stopnia pozostaje
+kryterium programu, nie gwarancja dokladnosci mechanizmu.
+Stare SPEED/ACCEL i rejestry 10/11 pozostaja kompatybilne, ale nie steruja juz
+predkoscia klapki. Rynna Modbus nadal korzysta z zadanego PWM.
+Wersja rejestru 5: 330. Po aktualizacji Ctrl+F5: naglowek v3.3.
