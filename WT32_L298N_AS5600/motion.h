@@ -22,7 +22,29 @@ constexpr uint32_t MOVE_TIMEOUT_MS = 60000;
 constexpr uint32_t STALL_TIMEOUT_MS = 1500;
 
 Preferences settings;
-uint16_t motionFault = 0;
+uint16_t motionFault = 0, motionFaultReason = 0, encoderFault = 0;
+const char* motionFaultText = "";
+const char* motionFaultHint = "";
+float faultAngle = 0, faultTarget = 0;
+int flapOutputPwm = 0, faultOutputPwm = 0;
+
+const char* encoderFaultText() {
+  switch (encoderFault) {
+    case 1: return "AS5600 nie odpowiada prawidlowo po I2C.";
+    case 2: return "AS5600 nie wykrywa magnesu.";
+    case 3: return "Pole magnesu jest za slabe.";
+    case 4: return "Pole magnesu jest za silne.";
+    default: return "Odczyt AS5600 prawidlowy.";
+  }
+}
+
+void clearMotionFault() {
+  motionFault = motionFaultReason = 0;
+  motionFaultText = motionFaultHint = "";
+  faultOutputPwm = 0;
+}
+
+
 bool calibrated = false, sensorOK = false, moving = false;
 uint16_t rawAngle = 0, zeroAngle = 0;
 float angle = 0, target = 0, initialError = 0, lastProgressAngle = 0;
@@ -59,7 +81,18 @@ float angleDifference(float to, float from) {
   return difference > 180.0f ? difference - 360.0f : difference;
 }
 
+void recordMotionFault(uint16_t category, uint16_t reason, const char* message, const char* hint) {
+  motionFault = category;
+  motionFaultReason = reason;
+  motionFaultText = message;
+  motionFaultHint = hint;
+  faultAngle = angle;
+  faultTarget = target;
+  faultOutputPwm = flapOutputPwm;
+}
+
 void flapOff() {
+  flapOutputPwm = 0;
   analogWrite(FLAP_A, 0);
   analogWrite(FLAP_B, 0);
 }
@@ -88,10 +121,13 @@ bool readBytes(uint8_t reg, uint8_t* data, uint8_t length) {
 
 bool readEncoder() {
   uint8_t status, bytes[2];
-  if (!readBytes(0x0B, &status, 1)) return false;
+  if (!readBytes(0x0B, &status, 1)) { encoderFault = 1; return false; }
   // MD must be set; ML and MH must both be clear.
-  if ((status & 0x38) != 0x20) return false;
-  if (!readBytes(0x0C, bytes, 2)) return false;
+  if (!(status & 0x20)) { encoderFault = 2; return false; }
+  if (status & 0x10) { encoderFault = 3; return false; }
+  if (status & 0x08) { encoderFault = 4; return false; }
+  if (!readBytes(0x0C, bytes, 2)) { encoderFault = 1; return false; }
+  encoderFault = 0;
   rawAngle = ((uint16_t(bytes[0]) << 8) | bytes[1]) & 0x0FFF;
   // Position is derived directly from the absolute reading on EVERY sample.
   angle = wrap360(ENCODER_SIGN * (int(rawAngle) - int(zeroAngle)) * (360.0f / 4096.0f));
@@ -114,8 +150,8 @@ bool readEncoder() {
   return true;
 }
 
-void failFlap(const char* message) {
-  motionFault = 1;
+void failFlap(uint16_t reason, const char* message, const char* hint) {
+  recordMotionFault(1, reason, message, hint);
   stopFlap();
   Serial.println(message);
 }
@@ -124,13 +160,13 @@ void updateFlap(uint32_t now) {
   if (!moving) return;
   if (!sensorOK) {
     trackingReady = false;
-    failFlap("STOP: blad I2C lub magnesu. Ponow GOTO po naprawie.");
+    failFlap(encoderFault, encoderFaultText(), "Sprawdz SDA GPIO17, SCL GPIO5, zasilanie 3,3 V, mase i ustawienie magnesu.");
     return;
   }
   const uint32_t profileTimeout = uint32_t((2 * rampTime + cruiseTime) * 1000) + 15000;
   const uint32_t allowedTime = profileTimeout > MOVE_TIMEOUT_MS ? profileTimeout : MOVE_TIMEOUT_MS;
   if (now - moveStarted >= allowedTime) {
-    failFlap("STOP: przekroczony czas profilu i korekt.");
+    failFlap(7, "Przekroczony czas dojazdu i korekt.", "Silnik nie osiagnal celu w wyznaczonym czasie. Sprawdz obciazenie, zasilanie oraz nastawy predkosci i przyspieszenia.");
     return;
   }
   const float error = goalPosition - position;
@@ -163,7 +199,7 @@ void updateFlap(uint32_t now) {
       return;
     }
     if (++correctionCount > 80) {
-      failFlap("STOP: nie uzyskano tolerancji 0.1 stopnia po 80 korektach.");
+      failFlap(8, "Nie uzyskano tolerancji 0,1 stopnia po 80 korektach.", "Sprawdz luzy przekladni i magnesu, obciazenie oraz minimalna moc potrzebna do ruszenia silnika.");
       return;
     }
     // Longer pulses for larger errors; increase duty only when no motion was detected.
@@ -173,6 +209,7 @@ void updateFlap(uint32_t now) {
     const bool forward = (error > 0) != MOTOR_REVERSE;
     analogWrite(forward ? FLAP_B : FLAP_A, 0);
     analogWrite(forward ? FLAP_A : FLAP_B, correctionPwm);
+    flapOutputPwm = correctionPwm;
     correctionPulse = true;
     phaseStarted = now;
     return;
@@ -184,7 +221,7 @@ void updateFlap(uint32_t now) {
     return;
   }
   if (fabsf(error) > fabsf(initialError) + 2.0f) {
-    failFlap("STOP: ruch w zlym kierunku. Sprawdz MOTOR_REVERSE / ENCODER_SIGN.");
+    failFlap(5, "Ruch w przeciwnym kierunku: klapka oddala sie od celu.", "Sprawdz kierunek obrotu. Po wylaczeniu zasilania silnika mozna zamienic OUT1 z OUT2. Sprawdz tez ENCODER_SIGN w motion.h.");
     return;
   }
   if (fabsf(position - lastProgressAngle) >= 0.3f) {
@@ -192,7 +229,7 @@ void updateFlap(uint32_t now) {
     progressTime = now;
   }
   if (now - progressTime >= STALL_TIMEOUT_MS) {
-    failFlap("STOP: brak postepu przez 1.5 s.");
+    failFlap(6, "Brak ruchu odczytanego z enkodera przez 1,5 sekundy.", "Sprawdz zasilanie silnika i logiki 5 V, zworke ENA, wspolna mase, IN1 GPIO32, IN2 GPIO33 oraz polaczenie magnesu z osia. To mozliwe przyczyny.");
     return;
   }
   const float elapsed = (now - moveStarted) / 1000.0f;
@@ -233,6 +270,7 @@ void updateFlap(uint32_t now) {
   const bool forward = (motionSign > 0) != MOTOR_REVERSE;
   analogWrite(forward ? FLAP_B : FLAP_A, 0);
   analogWrite(forward ? FLAP_A : FLAP_B, pwm);
+  flapOutputPwm = pwm;
 }
 
 void printStatus() {
@@ -262,13 +300,13 @@ void motionCommand(char* line) {
       return;
     }
     if (settings.putUInt("zero", rawAngle) != sizeof(uint32_t)) {
-      motionFault = 3;
+      recordMotionFault(3, 12, "Nie udalo sie zapisac pozycji zerowej w pamieci.", "Poprzednie odniesienie zostalo zachowane. Sprawdz zasilanie i pamiec NVS.");
       Serial.println("BLAD zapisu zera. Zachowano poprzednie odniesienie.");
       return;
     }
     zeroAngle = rawAngle;
     calibrated = true;
-    motionFault = 0;
+    clearMotionFault();
     angle = target = 0;
     position = 0;
     trackingReady = false;
@@ -287,7 +325,7 @@ void motionCommand(char* line) {
       Serial.println("GOTO odrzucone: sprawdz kat, ZERO i AS5600.");
       return;
     }
-    motionFault = 0;
+    clearMotionFault();
     target = wrap360(value);
     startPosition = position;
     initialError = angleDifference(target, angle);
