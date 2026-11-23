@@ -91,3 +91,13 @@ Strona pokazuje opis przyczyny zatrzymania, wskazowke co sprawdzic, kat i cel w 
 Kody szczegolowe: 1 komunikacja I2C, 2 brak magnesu, 3 zbyt slabe pole, 4 zbyt silne pole, 5 przeciwny kierunek, 6 brak postepu 1,5 s, 7 limit czasu dojazdu, 8 nieosiagnieta tolerancja po korektach, 9 utrata sieci, 10 brak heartbeat, 11 zamkniecie sesji Modbus, 12 blad zapisu zera, 13 blad PWM, 14 blad zadania sterowania.
 
 Komunikat o braku ruchu opisuje obserwacje enkodera i polecenie PWM. Sterownik nie mierzy napiecia ani pradu silnika, wiec podane przyczyny elektryczne sa wskazowkami do sprawdzenia. Po aktualizacji odswiez strone przez Ctrl+F5 i ponow probe, aby otrzymac nowy szczegolowy blad.
+
+
+## v3.2 — reczny test bez enkodera
+Na stronie WWW przytrzymaj LEWO/PRAWO, moc 1–100% (domyslnie 100%).
+Tryb nie wymaga AS5600 ani ZERO i nie kontroluje pozycji ani konca mechanicznego.
+Puszczenie przycisku, utrata aktywnosci okna lub STOP zatrzymuje test.
+Brak odnowienia polecenia przez 500 ms zatrzymuje silnik; limit pojedynczego testu 10 s.
+Przed zmiana kierunku obowiazuje przerwa 700 ms.
+OTA oraz globalny STOP zatrzymuja takze test. Pozycjonowanie nadal wymaga enkodera.
+Pinout bez zmian. Wersja w rejestrze 5: 320.
