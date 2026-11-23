@@ -46,7 +46,21 @@ void clearMotionFault() {
 
 
 bool calibrated = false, sensorOK = false, moving = false;
-bool manualJog = false;
+bool manualJog = false, calibratingMotor = false;
+float msPerDegree[2] = {83.333f, 83.333f};
+float stopLead[2] = {0, 0};
+float calStart = 0, calOffPosition = 0, calTravel = 0, calCoast = 0;
+int calDirection = 1;
+unsigned calPulses = 0;
+bool calPowered = false;
+uint32_t calPhaseAt = 0;
+const char* calibrationText = "Kalibracja nieuruchomiona.";
+void saveMotorCalibration() {
+  float values[4] = {msPerDegree[0], msPerDegree[1], stopLead[0], stopLead[1]};
+  if (settings.putBytes("motorcal", values, sizeof(values)) != sizeof(values))
+    calibrationText = "Blad zapisu kalibracji; wyniki aktywne do restartu.";
+  else calibrationText = "Kalibracja kierunku zakonczona i zapisana.";
+}
 int jogDirection = 0;
 uint32_t jogAt = 0, jogStarted = 0, jogStopped = 0;
 uint16_t rawAngle = 0, zeroAngle = 0;
@@ -103,6 +117,8 @@ void flapOff() {
 void stopFlap() {
   if (manualJog) jogStopped = millis();
   manualJog = false;
+  if (calibratingMotor) calibrationText = "Kalibracja przerwana.";
+  calibratingMotor = false;
   flapOff();
   moving = false;
   settling = correcting = correctionPulse = false;
@@ -161,41 +177,69 @@ void failFlap(uint16_t reason, const char* message, const char* hint) {
   Serial.println(message);
 }
 
+void driveFull(int direction) {
+  const bool forward = (direction > 0) != MOTOR_REVERSE;
+  analogWrite(forward ? FLAP_B : FLAP_A, 0);
+  analogWrite(forward ? FLAP_A : FLAP_B, 255);
+  flapOutputPwm = 255;
+}
+
 void updateFlap(uint32_t now) {
   if (!moving) return;
   if (manualJog) {
-    // Open-loop bench test: deliberately independent of encoder and saved zero.
     if (now - jogAt >= 500 || now - jogStarted >= 10000) stopFlap();
     return;
   }
   if (!sensorOK) {
     trackingReady = false;
-    failFlap(encoderFault, encoderFaultText(), "Sprawdz SDA GPIO17, SCL GPIO5, zasilanie 3,3 V, mase i ustawienie magnesu.");
+    failFlap(encoderFault, encoderFaultText(), "Sprawdz enkoder i magnes.");
     return;
   }
-  const uint32_t profileTimeout = uint32_t((2 * rampTime + cruiseTime) * 1000) + 15000;
-  const uint32_t allowedTime = profileTimeout > MOVE_TIMEOUT_MS ? profileTimeout : MOVE_TIMEOUT_MS;
-  if (now - moveStarted >= allowedTime) {
-    failFlap(7, "Przekroczony czas dojazdu i korekt.", "Silnik nie osiagnal celu w wyznaczonym czasie. Sprawdz obciazenie, zasilanie oraz nastawy predkosci i przyspieszenia.");
+  if (now - moveStarted >= MOVE_TIMEOUT_MS) {
+    failFlap(7, "Przekroczono czas ruchu.", "Sprawdz naped i odczyt kata.");
+    return;
+  }
+  if (calibratingMotor) {
+    const float travel = calDirection * (position - calStart);
+    if (travel < -0.5f || travel > 8.0f) {
+      failFlap(5, "Kalibracja: nieprawidlowy kierunek lub zbyt duzy ruch.",
+               "Sprawdz kierunek silnika i enkodera. Kalibracja wymaga wolnego miejsca.");
+      return;
+    }
+    if (calPowered) {
+      if (now - calPhaseAt >= 150) {
+        calOffPosition = position;
+        flapOff();
+        calPowered = false;
+        calPhaseAt = now;
+      }
+    } else if (now - calPhaseAt >= 700) {
+      calCoast += fmaxf(0, calDirection * (position - calOffPosition));
+      if (++calPulses >= 3) {
+        if (travel < 0.3f) {
+          failFlap(6, "Kalibracja: brak wystarczajacego ruchu.",
+                   "Sprawdz zasilanie, L298N i polaczenie magnesu.");
+          return;
+        }
+        const int index = calDirection > 0 ? 1 : 0;
+        msPerDegree[index] = constrain(450.0f / travel, 5.0f, 5000.0f);
+        stopLead[index] = constrain(calCoast / 3.0f, 0.0f, 3.0f);
+        calibratingMotor = false;
+        stopFlap();
+        saveMotorCalibration();
+        return;
+      }
+      driveFull(calDirection);
+      calPowered = true;
+      calPhaseAt = now;
+    }
     return;
   }
   const float error = goalPosition - position;
   if (settling) {
-    if (now - phaseStarted < 200) return;
+    if (now - phaseStarted < 700) return;
     settling = false;
-    if (fabsf(error) <= TOLERANCE) {
-      stopFlap();
-      Serial.println("Dojazd zakonczony: blad <= 0.1 stopnia.");
-      return;
-    }
-    if (correctionAwaitingCheck) {
-      if (fabsf(position - correctionStartPosition) < 0.04f) {
-        correctionPwm = min(correctionPwm + 20, 255);
-      } else {
-        correctionPwm = 95;
-      }
-      correctionAwaitingCheck = false;
-    }
+    if (fabsf(error) <= TOLERANCE) { stopFlap(); return; }
     correcting = true;
   }
   if (correcting) {
@@ -209,29 +253,26 @@ void updateFlap(uint32_t now) {
       return;
     }
     if (++correctionCount > 80) {
-      failFlap(8, "Nie uzyskano tolerancji 0,1 stopnia po 80 korektach.", "Sprawdz luzy przekladni i magnesu, obciazenie oraz minimalna moc potrzebna do ruszenia silnika.");
+      failFlap(8, "Nie osiagnieto tolerancji 0,1 stopnia.",
+               "Pelna moc i luzy napedu moga ograniczac dokladnosc. Wykonaj kalibracje obu kierunkow.");
       return;
     }
-    // Longer pulses for larger errors; increase duty only when no motion was detected.
-    correctionDuration = fabsf(error) > 1.0f ? 100 : (fabsf(error) > 0.3f ? 30 : 10);
-    correctionStartPosition = position;
-    correctionAwaitingCheck = true;
-    const bool forward = (error > 0) != MOTOR_REVERSE;
-    analogWrite(forward ? FLAP_B : FLAP_A, 0);
-    analogWrite(forward ? FLAP_A : FLAP_B, correctionPwm);
-    flapOutputPwm = correctionPwm;
+    const int direction = error > 0 ? 1 : -1;
+    correctionDuration = uint32_t(constrain(fabsf(error) * msPerDegree[direction > 0 ? 1 : 0] * 0.5f, 5.0f, 100.0f));
+    driveFull(direction);
     correctionPulse = true;
     phaseStarted = now;
     return;
   }
-  if (fabsf(error) <= TOLERANCE || error * initialError <= 0) {
+  const int index = motionSign > 0 ? 1 : 0;
+  if (fabsf(error) <= fmaxf(TOLERANCE, stopLead[index]) || error * initialError <= 0) {
     flapOff();
     settling = true;
     phaseStarted = now;
     return;
   }
   if (fabsf(error) > fabsf(initialError) + 2.0f) {
-    failFlap(5, "Ruch w przeciwnym kierunku: klapka oddala sie od celu.", "Sprawdz kierunek obrotu. Po wylaczeniu zasilania silnika mozna zamienic OUT1 z OUT2. Sprawdz tez ENCODER_SIGN w motion.h.");
+    failFlap(5, "Silnik oddala sie od celu.", "Sprawdz kierunek silnika i enkodera.");
     return;
   }
   if (fabsf(position - lastProgressAngle) >= 0.3f) {
@@ -239,48 +280,10 @@ void updateFlap(uint32_t now) {
     progressTime = now;
   }
   if (now - progressTime >= STALL_TIMEOUT_MS) {
-    failFlap(6, "Brak ruchu odczytanego z enkodera przez 1,5 sekundy.", "Sprawdz zasilanie silnika i logiki 5 V, zworke ENA, wspolna mase, IN1 GPIO32, IN2 GPIO33 oraz polaczenie magnesu z osia. To mozliwe przyczyny.");
+    failFlap(6, "Brak ruchu mimo pelnej mocy.", "Sprawdz zasilanie, ENA, IN1/IN2 i mase L298N.");
     return;
   }
-  const float elapsed = (now - moveStarted) / 1000.0f;
-  float referenceDistance, referenceSpeed;
-  const float rampDistance = 0.5f * acceleration * rampTime * rampTime;
-  if (elapsed < rampTime) {
-    referenceSpeed = acceleration * elapsed;
-    referenceDistance = 0.5f * acceleration * elapsed * elapsed;
-  } else if (elapsed < rampTime + cruiseTime) {
-    referenceSpeed = peakSpeed;
-    referenceDistance = rampDistance + peakSpeed * (elapsed - rampTime);
-  } else if (elapsed < 2 * rampTime + cruiseTime) {
-    const float remainingTime = 2 * rampTime + cruiseTime - elapsed;
-    referenceSpeed = acceleration * remainingTime;
-    referenceDistance = profileDistance - 0.5f * acceleration * remainingTime * remainingTime;
-  } else {
-    // Check settled position and use bounded corrections if the motor lagged.
-    flapOff();
-    settling = true;
-    phaseStarted = now;
-    return;
-  }
-  const float referencePosition = startPosition + motionSign * referenceDistance;
-  const float alongTrackError = motionSign * (referencePosition - position);
-  const float requestedSpeed = constrain(referenceSpeed + 2.0f * alongTrackError, 0.0f, maxSpeed);
-  const float speedError = requestedSpeed - motionSign * measuredSpeed;
-  const float dt = (now - lastControlTime) / 1000.0f;
-  lastControlTime = now;
-  // Feed-forward plus velocity feedback. Gains require verification on the motor.
-  const float feedForward = 255.0f * requestedSpeed / 12.0f;
-  const float candidateIntegral = constrain(speedIntegral + 8.0f * speedError * dt, -60.0f, 60.0f);
-  const float candidateOutput = feedForward + 6.0f * speedError + candidateIntegral;
-  if ((candidateOutput >= 0 && candidateOutput <= 255) ||
-      (candidateOutput > 255 && speedError < 0) ||
-      (candidateOutput < 0 && speedError > 0)) speedIntegral = candidateIntegral;
-  const int pwm = requestedSpeed < 0.05f ? 0 :
-                  int(constrain(feedForward + 6.0f * speedError + speedIntegral, 0.0f, 255.0f));
-  const bool forward = (motionSign > 0) != MOTOR_REVERSE;
-  analogWrite(forward ? FLAP_B : FLAP_A, 0);
-  analogWrite(forward ? FLAP_A : FLAP_B, pwm);
-  flapOutputPwm = pwm;
+  driveFull(motionSign);
 }
 
 void printStatus() {
