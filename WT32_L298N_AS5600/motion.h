@@ -262,11 +262,13 @@ void motionCommand(char* line) {
       return;
     }
     if (settings.putUInt("zero", rawAngle) != sizeof(uint32_t)) {
+      motionFault = 3;
       Serial.println("BLAD zapisu zera. Zachowano poprzednie odniesienie.");
       return;
     }
     zeroAngle = rawAngle;
     calibrated = true;
+    motionFault = 0;
     angle = target = 0;
     position = 0;
     trackingReady = false;
