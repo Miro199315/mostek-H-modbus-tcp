@@ -29,7 +29,7 @@
 #define DRYER_WIFI_NETWORKS "[]"
 #endif
 
-constexpr uint16_t FIRMWARE_VERSION = 310;
+constexpr uint16_t FIRMWARE_VERSION = 320;
 constexpr unsigned CLIENT_COUNT = 3;
 constexpr int NO_OWNER = -1, WEB_OWNER = 100, USB_OWNER = 101;
 constexpr uint32_t LEASE_MS = 1500;
@@ -389,7 +389,7 @@ void endFailedMaintenance() {
 const char CONTROL_PAGE[] PROGMEM = R"html(<!doctype html><html lang="pl"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Klapka suszarni</title>
 <style>body{font:17px system-ui;margin:24px auto;padding:0 16px;max-width:600px;background:#f5f6f4;color:#183426}section{background:white;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,button{font:inherit;padding:10px;box-sizing:border-box;max-width:100%}input{width:150px}button{cursor:pointer;margin:4px;background:#1c6042;color:white;border:0;border-radius:6px}#stop{background:#ad302a}#state{white-space:pre-line}#message{min-height:28px}#faultBox{background:#fff0ed;border:2px solid #ad302a;color:#76241d;padding:16px;border-radius:8px;margin-top:16px}#faultBox p{margin:8px 0}#faultDetails{font-size:14px}a{color:#1c6042}</style>
-<h1>Klapka suszarni</h1><section><div id="state">Laczenie...</div>
+<h1>Klapka suszarni <small>v3.2</small></h1><section><div id="state">Laczenie...</div>
 <div id="faultBox" role="alert" hidden><strong id="faultText"></strong><p id="faultHint"></p><p id="faultDetails"></p></div></section>
 <section><label>Kat zadany [°] <input id="angle" type="number" min="0" max="360" step="0.1" value="30"></label>
 <button onclick="act('move')">Ustaw kat</button><button id="stop" onclick="act('stop')">STOP obu napedow</button>
@@ -397,6 +397,11 @@ const char CONTROL_PAGE[] PROGMEM = R"html(<!doctype html><html lang="pl"><meta 
 <label>Przyspieszenie i hamowanie [°/s²] <input id="accel" type="number" min="1" max="120" step="0.1" value="12"></label>
 <button onclick="act('tune')">Zastosuj parametry</button><button onclick="act('save')">Zapisz parametry</button>
 <p>Ustaw mechanizm w pozycji zerowej przed zapisaniem odniesienia.</p><button onclick="act('zero')">Zapisz aktualna pozycje jako zero</button>
+<h2>Test silnika bez enkodera</h2>
+<p>Przytrzymaj przycisk. Bez kontroli kata i krancowek; maksymalnie 10 s na nacisniecie.</p>
+<label>Moc [%] <input id="power" type="number" min="1" max="100" value="100"></label>
+<button class="jog" data-direction="-1" style="touch-action:none">Przytrzymaj: LEWO</button>
+<button class="jog" data-direction="1" style="touch-action:none">Przytrzymaj: PRAWO</button>
 <p id="message" role="status"></p></section><p><a href="/update">Aktualizacja programu OTA</a></p>
 <script>
 const token = '__TOKEN__';
@@ -404,10 +409,11 @@ let alive = false;
 let busy = false;
 let loaded = false;
 
-async function post(action) {
+async function post(action, extra = {}) {
   const data = new URLSearchParams({
     token,
     action,
+    ...extra,
     angle: document.querySelector('#angle').value,
     speed: document.querySelector('#speed').value,
     accel: document.querySelector('#accel').value
@@ -439,7 +445,8 @@ async function poll() {
     const state = await response.json();
     alive = state.moving && state.webOwner;
     document.querySelector('#state').textContent = [
-      `Kat: ${state.angle.toFixed(2)}°`,
+      `Tryb: ${state.manual ? "TEST BEZ ENKODERA" : "pozycjonowanie"}`,
+      `Kat: ${state.sensor ? state.angle.toFixed(2) + "°" : "brak odczytu"}`,
       `Cel: ${state.target.toFixed(1)}°`,
       `AS5600: ${state.sensor ? 'OK' : state.encoderText}`,
       `Zero: ${state.calibrated ? 'zapisane' : 'wymagane'}`,
@@ -467,6 +474,39 @@ async function poll() {
   }
 }
 
+let held = false, jogTimer = null, jogLimit = null, jogQueue = Promise.resolve();
+function queueJog(action, extra = {}) {
+  jogQueue = jogQueue.then(() => post(action, extra)).then(text => {
+    document.querySelector('#message').textContent = text;
+  }).catch(error => {
+    document.querySelector('#message').textContent = error.message;
+    if (held) endJog();
+  });
+}
+function endJog() {
+  if (!held) return;
+  held = false;
+  clearInterval(jogTimer);
+  clearTimeout(jogLimit);
+  queueJog('jogstop');
+}
+for (const button of document.querySelectorAll('.jog')) {
+  button.addEventListener('pointerdown', event => {
+    if (held || event.button !== 0) return;
+    event.preventDefault();
+    held = true;
+    button.setPointerCapture(event.pointerId);
+    const extra = {direction: button.dataset.direction, power: document.querySelector('#power').value};
+    queueJog('jog', extra);
+    jogTimer = setInterval(() => { if (held) queueJog('jog', extra); }, 150);
+    jogLimit = setTimeout(endJog, 9500);
+  });
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture'])
+    button.addEventListener(name, endJog);
+}
+window.addEventListener('blur', endJog);
+document.addEventListener('visibilitychange', () => { if (document.hidden) endJog(); });
+document.querySelector('#stop').addEventListener('pointerdown', endJog);
 setInterval(poll, 400);
 poll();
 </script></html>)html";
@@ -497,6 +537,8 @@ void setupWeb() {
     state["sensor"] = sensorOK;
     state["calibrated"] = calibrated;
     state["moving"] = moving;
+    state["manual"] = manualJog;
+    state["version"] = "3.2";
     state["fault"] = motionFault;
     state["faultReason"] = motionFaultReason;
     state["faultText"] = motionFaultText;
@@ -536,13 +578,46 @@ void setupWeb() {
       responseText = "Zatrzymano oba napedy. Opis ostatniego bledu pozostaje widoczny.";
       ok = true;
     } else if (action == "heartbeat") {
-      if (flapOwner == WEB_OWNER) flapAt = millis();
+      if (flapOwner == WEB_OWNER && !manualJog) flapAt = millis();
       responseText = "OK";
       ok = true;
     } else if (maintenance) {
       responseText = "Trwa aktualizacja OTA. Sterowanie zostalo zatrzymane.";
     } else if (!driverReady) {
       responseText = "Wyjscia silnikow nie sa gotowe. Sprawdz komunikat bledu na stronie.";
+    } else if (action == "jogstop") {
+      if (manualJog && flapOwner == WEB_OWNER) { stopFlap(); flapOwner = NO_OWNER; }
+      responseText = "Test zatrzymany.";
+      ok = true;
+    } else if (action == "jog") {
+      float direction = 0, power = 0;
+      const bool validJog = parseNumber(web.arg("direction"), direction) &&
+          (direction == 1 || direction == -1) &&
+          parseNumber(web.arg("power"), power) && power >= 1 && power <= 100;
+      if (!validJog) responseText = "Test: kierunek -1 lub 1, moc 1..100%.";
+      else if (moving && !(manualJog && flapOwner == WEB_OWNER && jogDirection == int(direction)))
+        responseText = "Najpierw STOP przed zmiana trybu lub kierunku.";
+      else if (!manualJog && jogDirection && jogDirection != int(direction) && millis() - jogStopped < 700)
+        responseText = "Odczekaj chwile przed zmiana kierunku.";
+      else {
+        if (!manualJog) {
+          flapOff();
+          clearMotionFault();
+          jogStarted = millis();
+          jogDirection = int(direction);
+        }
+        manualJog = moving = true;
+        flapOwner = WEB_OWNER;
+        flapUsesEthernet = web.client().localIP() == ethernetIP;
+        jogAt = flapAt = millis();
+        const bool forward = (direction > 0) != MOTOR_REVERSE;
+        const int pwm = int(lroundf(power * 255 / 100));
+        analogWrite(forward ? FLAP_B : FLAP_A, 0);
+        analogWrite(forward ? FLAP_A : FLAP_B, pwm);
+        flapOutputPwm = pwm;
+        responseText = "Test bez enkodera: maksymalnie 10 sekund.";
+        ok = true;
+      }
     } else if (action == "move") {
       if (!validMove) responseText = "Wpisz kat od 0 do 360 stopni.";
       else if (moving) responseText = "Klapka jest w ruchu. Zatrzymaj ja przed zadaniem nowej pozycji.";
@@ -738,7 +813,7 @@ void setup() {
     ArduinoOTA.onEnd([]() { Serial.println("Arduino OTA: gotowe."); });
     ArduinoOTA.onError([](ota_error_t) { endFailedMaintenance(); Serial.println("Arduino OTA: blad."); });
   }
-  Serial.println("WT32 L298N + AS5600 v3.1 / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
+  Serial.println("WT32 L298N + AS5600 v3.2 / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
   Serial.println("AS5600 SDA17 SCL5; L298N IN1=32 IN2=33 IN3=14 IN4=4.");
   Serial.println("Nowy ESP wymaga ZERO. USB 115200: kat, ZERO, SPEED, ACCEL, SAVE, STOP, STATUS.");
 }
