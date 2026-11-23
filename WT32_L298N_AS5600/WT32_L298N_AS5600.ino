@@ -29,7 +29,7 @@
 #define DRYER_WIFI_NETWORKS "[]"
 #endif
 
-constexpr uint16_t FIRMWARE_VERSION = 300;
+constexpr uint16_t FIRMWARE_VERSION = 310;
 constexpr unsigned CLIENT_COUNT = 3;
 constexpr int NO_OWNER = -1, WEB_OWNER = 100, USB_OWNER = 101;
 constexpr uint32_t LEASE_MS = 1500;
@@ -98,9 +98,13 @@ void controlTask(void*) {
     } else {
       if (moving && flapOwner != USB_OWNER &&
           (flapOwner == NO_OWNER || !ownerOnline(flapUsesEthernet) || now - flapAt > LEASE_MS)) {
+        if (!ownerOnline(flapUsesEthernet)) {
+          recordMotionFault(2, 9, "Utracono polaczenie sieciowe sterujace klapka.", "Sprawdz kabel Ethernet lub polaczenie Wi-Fi. Po odzyskaniu polaczenia wyslij nowe polecenie.");
+        } else {
+          recordMotionFault(2, 10, "Brak odswiezania polecenia przez 1,5 sekundy.", "Pozostaw strone sterowania otwarta. Klient Modbus powinien zapisywac rejestr 13 co 500 ms w tej samej sesji.");
+        }
         stopFlap();
         flapOwner = NO_OWNER;
-        motionFault = 2;
       }
       updateFlap(now);
       if (!moving) flapOwner = NO_OWNER;
@@ -138,9 +142,9 @@ void closeSession(unsigned index) {
   lockMotion();
   if (liftOwner == int(index)) haltLift(true);
   if (flapOwner == int(index)) {
+    recordMotionFault(2, 11, "Klient Modbus zamknal polaczenie sterujace klapka.", "Sprawdz klienta Modbus. Sesja z poleceniem jazdy musi pozostac otwarta do zakonczenia ruchu.");
     stopFlap();
     flapOwner = NO_OWNER;
-    motionFault = 2;
   }
   unlockMotion();
 }
@@ -236,7 +240,6 @@ uint8_t applyRegisters(unsigned index, uint16_t address, uint16_t count, const u
   if (address <= 7 && uint32_t(address) + count > 7 && command == 0) {
     stopFlap();
     flapOwner = NO_OWNER;
-    motionFault = 0;
   }
   if (directionWritten) {
     if (direction == 0) {
@@ -385,8 +388,9 @@ void endFailedMaintenance() {
 
 const char CONTROL_PAGE[] PROGMEM = R"html(<!doctype html><html lang="pl"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Klapka suszarni</title>
-<style>body{font:17px system-ui;margin:24px auto;padding:0 16px;max-width:600px;background:#f5f6f4;color:#183426}section{background:white;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,button{font:inherit;padding:10px;box-sizing:border-box;max-width:100%}input{width:150px}button{cursor:pointer;margin:4px;background:#1c6042;color:white;border:0;border-radius:6px}#stop{background:#ad302a}#state{white-space:pre-line}#message{min-height:28px}a{color:#1c6042}</style>
-<h1>Klapka suszarni</h1><section><div id="state">Laczenie...</div></section>
+<style>body{font:17px system-ui;margin:24px auto;padding:0 16px;max-width:600px;background:#f5f6f4;color:#183426}section{background:white;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,button{font:inherit;padding:10px;box-sizing:border-box;max-width:100%}input{width:150px}button{cursor:pointer;margin:4px;background:#1c6042;color:white;border:0;border-radius:6px}#stop{background:#ad302a}#state{white-space:pre-line}#message{min-height:28px}#faultBox{background:#fff0ed;border:2px solid #ad302a;color:#76241d;padding:16px;border-radius:8px;margin-top:16px}#faultBox p{margin:8px 0}#faultDetails{font-size:14px}a{color:#1c6042}</style>
+<h1>Klapka suszarni</h1><section><div id="state">Laczenie...</div>
+<div id="faultBox" role="alert" hidden><strong id="faultText"></strong><p id="faultHint"></p><p id="faultDetails"></p></div></section>
 <section><label>Kat zadany [°] <input id="angle" type="number" min="0" max="360" step="0.1" value="30"></label>
 <button onclick="act('move')">Ustaw kat</button><button id="stop" onclick="act('stop')">STOP obu napedow</button>
 <label>Predkosc [°/s] <input id="speed" type="number" min="1" max="12" step="0.1" value="12"></label>
@@ -394,11 +398,78 @@ const char CONTROL_PAGE[] PROGMEM = R"html(<!doctype html><html lang="pl"><meta 
 <button onclick="act('tune')">Zastosuj parametry</button><button onclick="act('save')">Zapisz parametry</button>
 <p>Ustaw mechanizm w pozycji zerowej przed zapisaniem odniesienia.</p><button onclick="act('zero')">Zapisz aktualna pozycje jako zero</button>
 <p id="message" role="status"></p></section><p><a href="/update">Aktualizacja programu OTA</a></p>
-<script>const token='__TOKEN__';let alive=false,busy=false,loaded=false;
-async function post(action){const data=new URLSearchParams({token,action,angle:document.querySelector('#angle').value,speed:document.querySelector('#speed').value,accel:document.querySelector('#accel').value});const r=await fetch('/api/control',{method:'POST',body:data});const text=await r.text();if(!r.ok)throw Error(text);return text;}
-async function act(action){try{document.querySelector('#message').textContent=await post(action);if(action==='move')alive=true;if(action==='stop')alive=false;}catch(e){document.querySelector('#message').textContent=e.message;}}
-async function poll(){if(busy)return;busy=true;try{if(alive)await post('heartbeat');const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error('Brak odpowiedzi sterownika');const s=await r.json();alive=s.moving&&s.webOwner;document.querySelector('#state').textContent=`Kat: ${s.angle.toFixed(2)}°\nCel: ${s.target.toFixed(1)}°\nAS5600: ${s.sensor?'OK':'BLAD'} | Zero: ${s.calibrated?'zapisane':'wymagane'}\nKlapka: ${s.moving?'ruch':'postoj'} | Blad: ${s.fault}\nRynna: ${s.lift}\nEthernet: ${s.eth} | Wi-Fi: ${s.wifi}`;if(!loaded){document.querySelector('#speed').value=s.speed;document.querySelector('#accel').value=s.accel;loaded=true;}}catch(e){document.querySelector('#state').textContent=e.message;}finally{busy=false;}}
-setInterval(poll,400);poll();</script></html>)html";
+<script>
+const token = '__TOKEN__';
+let alive = false;
+let busy = false;
+let loaded = false;
+
+async function post(action) {
+  const data = new URLSearchParams({
+    token,
+    action,
+    angle: document.querySelector('#angle').value,
+    speed: document.querySelector('#speed').value,
+    accel: document.querySelector('#accel').value
+  });
+  const response = await fetch('/api/control', {method: 'POST', body: data});
+  const text = await response.text();
+  if (!response.ok) throw Error(text);
+  return text;
+}
+
+async function act(action) {
+  try {
+    document.querySelector('#message').textContent = await post(action);
+    if (action === 'move') alive = true;
+    if (action === 'stop') alive = false;
+    await poll();
+  } catch (error) {
+    document.querySelector('#message').textContent = error.message;
+  }
+}
+
+async function poll() {
+  if (busy) return;
+  busy = true;
+  try {
+    if (alive) await post('heartbeat');
+    const response = await fetch('/api/status', {cache: 'no-store'});
+    if (!response.ok) throw Error('Brak odpowiedzi sterownika');
+    const state = await response.json();
+    alive = state.moving && state.webOwner;
+    document.querySelector('#state').textContent = [
+      `Kat: ${state.angle.toFixed(2)}°`,
+      `Cel: ${state.target.toFixed(1)}°`,
+      `AS5600: ${state.sensor ? 'OK' : state.encoderText}`,
+      `Zero: ${state.calibrated ? 'zapisane' : 'wymagane'}`,
+      `Klapka: ${state.moving ? 'ruch' : 'postoj'} | PWM zadane: ${Math.round(state.pwm * 100 / 255)}%`,
+      `Wyjscia: ${state.ready ? 'gotowe' : 'BLAD'} | OTA: ${state.maintenance ? 'aktualizacja' : 'postoj'}`,
+      `Rynna: ${state.lift}`,
+      `Ethernet: ${state.eth} | Wi-Fi: ${state.wifi}`
+    ].join('\n');
+    document.querySelector('#faultBox').hidden = !state.fault;
+    document.querySelector('#faultText').textContent = state.faultText;
+    document.querySelector('#faultHint').textContent = state.faultHint;
+    document.querySelector('#faultDetails').textContent =
+      `Kod ${state.faultReason} | Ostatni odczyt kata: ${state.faultAngle.toFixed(2)}° | ` +
+      `Cel: ${state.faultTarget.toFixed(1)}° | PWM zadane przed zatrzymaniem: ` +
+      `${Math.round(state.faultPwm * 100 / 255)}%.`;
+    if (!loaded) {
+      document.querySelector('#speed').value = state.speed;
+      document.querySelector('#accel').value = state.accel;
+      loaded = true;
+    }
+  } catch (error) {
+    document.querySelector('#state').textContent = error.message;
+  } finally {
+    busy = false;
+  }
+}
+
+setInterval(poll, 400);
+poll();
+</script></html>)html";
 
 bool parseNumber(const String& text, float& value) {
   String normalized = text;
@@ -427,6 +498,16 @@ void setupWeb() {
     state["calibrated"] = calibrated;
     state["moving"] = moving;
     state["fault"] = motionFault;
+    state["faultReason"] = motionFaultReason;
+    state["faultText"] = motionFaultText;
+    state["faultHint"] = motionFaultHint;
+    state["faultAngle"] = faultAngle;
+    state["faultTarget"] = faultTarget;
+    state["faultPwm"] = faultOutputPwm;
+    state["encoderText"] = encoderFaultText();
+    state["pwm"] = flapOutputPwm;
+    state["ready"] = driverReady;
+    state["maintenance"] = maintenance;
     state["webOwner"] = flapOwner == WEB_OWNER;
     state["lift"] = liftDirection;
     state["speed"] = maxSpeed;
@@ -448,31 +529,56 @@ void setupWeb() {
     const bool validTuning = parseNumber(web.arg("speed"), speed) && speed >= 1 && speed <= 12 &&
                              parseNumber(web.arg("accel"), accel) && accel >= 1 && accel <= 120;
     bool ok = false;
+    const char* responseText = "Nieznane polecenie.";
     lockMotion();
     if (action == "stop") {
       haltAll();
-      motionFault = 0;
+      responseText = "Zatrzymano oba napedy. Opis ostatniego bledu pozostaje widoczny.";
       ok = true;
     } else if (action == "heartbeat") {
       if (flapOwner == WEB_OWNER) flapAt = millis();
+      responseText = "OK";
       ok = true;
-    } else if (!maintenance && driverReady) {
-      if (action == "move" && validMove) {
+    } else if (maintenance) {
+      responseText = "Trwa aktualizacja OTA. Sterowanie zostalo zatrzymane.";
+    } else if (!driverReady) {
+      responseText = "Wyjscia silnikow nie sa gotowe. Sprawdz komunikat bledu na stronie.";
+    } else if (action == "move") {
+      if (!validMove) responseText = "Wpisz kat od 0 do 360 stopni.";
+      else if (moving) responseText = "Klapka jest w ruchu. Zatrzymaj ja przed zadaniem nowej pozycji.";
+      else if (!calibrated) responseText = "Brak zapisanego zera. Ustaw mechanizm i zapisz pozycje zerowa.";
+      else if (!sensorOK) responseText = encoderFaultText();
+      else {
         ok = startFlap(destination, WEB_OWNER, web.client().localIP() == ethernetIP);
-      } else if (action == "tune" && validTuning && !moving) {
+        responseText = ok ? "Przyjeto pozycje. Ruch i ewentualny blad sa pokazywane powyzej." : encoderFaultText();
+      }
+    } else if (action == "tune") {
+      if (!validTuning) responseText = "Predkosc musi wynosic 1..12 stopni/s, przyspieszenie 1..120 stopni/s^2.";
+      else if (moving) responseText = "Zatrzymaj klapke przed zmiana parametrow.";
+      else {
         maxSpeed = speed;
         acceleration = accel;
+        responseText = "Zastosowano parametry.";
         ok = true;
-      } else if (action == "save" && !moving) {
+      }
+    } else if (action == "save") {
+      if (moving) responseText = "Zatrzymaj klapke przed zapisem parametrow.";
+      else {
         ok = saveTuning();
-      } else if (action == "zero" && !moving && !liftCommand) {
+        responseText = ok ? "Parametry zapisane w pamieci." : "Nie udalo sie zapisac parametrow w pamieci NVS.";
+      }
+    } else if (action == "zero") {
+      if (moving || liftCommand) responseText = "Zatrzymaj oba napedy przed zapisaniem zera.";
+      else if (!sensorOK) responseText = encoderFaultText();
+      else {
         char zero[] = "ZERO";
         motionCommand(zero);
         ok = sensorOK && calibrated && motionFault != 3;
+        responseText = ok ? "Zapisano pozycje zerowa." : (sensorOK ? motionFaultText : encoderFaultText());
       }
     }
     unlockMotion();
-    web.send(ok ? 200 : 409, "text/plain; charset=utf-8", ok ? "OK" : "Odrzucono: sprawdz postoj, czujnik, zapis zera i wartosci.");
+    web.send(ok ? 200 : 409, "text/plain; charset=utf-8", responseText);
   });
   web.on("/update", HTTP_GET, []() {
     if (!requireLogin()) return;
@@ -612,9 +718,11 @@ void setup() {
   }
   sensorOK = readEncoder();
   driverReady = pwmOK;
+  if (!pwmOK) recordMotionFault(1, 13, "Nie udalo sie uruchomic wyjsc PWM.", "Sprawdz wybor plytki i konfiguracje GPIO. Napedy pozostaja zatrzymane.");
   if (xTaskCreatePinnedToCore(controlTask, "motion", 8192, nullptr, 2, nullptr, 1) != pdPASS) {
     driverReady = false;
     haltAll();
+    recordMotionFault(1, 14, "Nie udalo sie uruchomic zadania sterowania silnikami.", "Sprawdz zasilanie i uruchom sterownik ponownie. Napedy pozostaja zatrzymane.");
     Serial.println("Blad zadania sterowania. Napedy wylaczone.");
   }
   Network.begin();
@@ -630,7 +738,7 @@ void setup() {
     ArduinoOTA.onEnd([]() { Serial.println("Arduino OTA: gotowe."); });
     ArduinoOTA.onError([](ota_error_t) { endFailedMaintenance(); Serial.println("Arduino OTA: blad."); });
   }
-  Serial.println("WT32 L298N + AS5600 v3.0 / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
+  Serial.println("WT32 L298N + AS5600 v3.1 / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
   Serial.println("AS5600 SDA17 SCL5; L298N IN1=32 IN2=33 IN3=14 IN4=4.");
   Serial.println("Nowy ESP wymaga ZERO. USB 115200: kat, ZERO, SPEED, ACCEL, SAVE, STOP, STATUS.");
 }
