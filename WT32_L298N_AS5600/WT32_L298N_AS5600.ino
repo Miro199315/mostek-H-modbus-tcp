@@ -33,7 +33,7 @@
 #define DRYER_WIFI_NETWORKS "[]"
 #endif
 
-constexpr uint16_t FIRMWARE_VERSION = 410;
+constexpr uint16_t FIRMWARE_VERSION = 420;
 constexpr unsigned CLIENT_COUNT = 3;
 constexpr int NO_OWNER = -1, WEB_OWNER = 100, USB_OWNER = 101;
 constexpr uint32_t LEASE_MS = 1500;
@@ -60,11 +60,6 @@ String controlToken;
 bool serverStarted = false, otaStarted = false, rebootPending = false;
 bool uploadAccepted = false, uploadFailed = false, uploadSucceeded = false;
 uint32_t rebootAt = 0, otaLastByte = 0;
-struct WifiEntry { String ssid, password; };
-WifiEntry networks[6];
-unsigned networkCount = 0, networkIndex = 0;
-bool wifiAttempted = false, wifiReported = false;
-uint32_t wifiAttemptAt = 0;
 bool watchdogReady = false, mainWatchdog = false, controlWatchdog = false;
 uint32_t bootId = 0, ethernetDrops = 0, wifiDrops = 0, serverRestarts = 0;
 uint32_t lastControlAt = 0;
@@ -472,7 +467,7 @@ void endFailedMaintenance() {
 const char CONTROL_PAGE[] PROGMEM = R"html(<!doctype html><html lang="pl"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Klapka suszarni</title>
 <style>body{font:17px system-ui;margin:24px auto;padding:0 16px;max-width:600px;background:#f5f6f4;color:#183426}section{background:white;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,button{font:inherit;padding:10px;box-sizing:border-box;max-width:100%}input{width:150px}button{cursor:pointer;margin:4px;background:#1c6042;color:white;border:0;border-radius:6px}#stop{background:#ad302a}#state{white-space:pre-line}#message{min-height:28px}#faultBox{background:#fff0ed;border:2px solid #ad302a;color:#76241d;padding:16px;border-radius:8px;margin-top:16px}#faultBox p{margin:8px 0}#faultDetails{font-size:14px}a{color:#1c6042}</style>
-<h1>Klapka suszarni <small>v4.1</small></h1><section><div id="state">Laczenie...</div>
+<h1>Klapka suszarni <small>v4.2 Ethernet</small></h1><section><div id="state">Laczenie...</div>
 <div id="faultBox" role="alert" hidden><strong id="faultText"></strong><p id="faultHint"></p><p id="faultDetails"></p></div></section>
 <section><label>Pozycja zadana [0–10] <input id="angle" type="number" min="0" max="10" step="0.1" value="5"></label>
 <button onclick="act('move')">Ustaw pozycje</button><button id="stop" onclick="act('stop')">STOP obu napedow</button>
@@ -702,7 +697,7 @@ void setupWeb() {
     state["calibrationText"] = calibrationText;
     state["msLeft"] = msPerDegree[0];
     state["msRight"] = msPerDegree[1];
-    state["version"] = "4.1";
+    state["version"] = "4.2-ethernet";
     state["fault"] = motionFault;
     state["faultReason"] = motionFaultReason;
     state["faultText"] = motionFaultText;
@@ -720,7 +715,7 @@ void setupWeb() {
     state["accel"] = acceleration;
     unlockMotion();
     state["eth"] = ETH.localIP().toString();
-    state["wifi"] = WiFi.localIP().toString();
+    state["wifi"] = "wylaczone";
     String json;
     serializeJson(state, json);
     web.sendHeader("Cache-Control", "no-store");
@@ -895,38 +890,13 @@ void setupWeb() {
   web.onNotFound([]() { web.sendHeader("Connection", "close"); web.send(404, "text/plain", "Nie znaleziono."); });
 }
 
-void addWifi(const char* ssid, const char* password) {
-  if (!ssid || !ssid[0] || networkCount == 6) return;
-  for (unsigned i = 0; i < networkCount; ++i) if (networks[i].ssid == ssid) return;
-  networks[networkCount++] = {String(ssid), String(password ? password : "")};
-}
-
+// Ethernet-only diagnostic build: never start or reconnect the Wi-Fi radio.
 void setupWifi() {
-  JsonDocument document;
-  if (!deserializeJson(document, DRYER_WIFI_NETWORKS) && document.is<JsonArray>()) {
-    for (JsonObject entry : document.as<JsonArray>()) addWifi(entry["ssid"] | "", entry["password"] | "");
-  }
-  addWifi(DRYER_BOOTSTRAP_WIFI, DRYER_BOOTSTRAP_WIFI_PASSWORD);
-  WiFi.mode(WIFI_STA);
-  WiFi.setHostname("suszarnia-klapka");
-  WiFi.setAutoReconnect(false);
+  WiFi.mode(WIFI_OFF);
 }
 
 void serviceWifi() {
-  const bool connected = WiFi.status() == WL_CONNECTED;
-  if (connected && !wifiReported) { Serial.print("Wi-Fi IP: "); Serial.println(WiFi.localIP()); }
-  wifiReported = connected;
-  if (connected || !networkCount || rebootPending) return;
-  lockMotion();
-  const bool idle = !moving && !liftCommand && !maintenance;
-  unlockMotion();
-  if (idle && (!wifiAttempted || millis() - wifiAttemptAt >= 12000)) {
-    WiFi.disconnect(false);
-    WiFi.begin(networks[networkIndex].ssid.c_str(), networks[networkIndex].password.c_str());
-    networkIndex = (networkIndex + 1) % networkCount;
-    wifiAttempted = true;
-    wifiAttemptAt = millis();
-  }
+  // Intentionally disabled, including background reconnect attempts.
 }
 
 void serviceSerial() {
@@ -1020,7 +990,7 @@ void setup() {
     ArduinoOTA.onEnd([]() { Serial.println("Arduino OTA: gotowe."); });
     ArduinoOTA.onError([](ota_error_t) { endFailedMaintenance(); Serial.println("Arduino OTA: blad."); });
   }
-  Serial.println("WT32 L298N + AS5600 v4.1 / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
+  Serial.println("WT32 L298N + AS5600 v4.2 Ethernet / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
   Serial.println("AS5600 SDA17 SCL5; L298N IN1=32 IN2=33 IN3=14 IN4=4.");
   Serial.println("Skala 0-10 wymaga zapisania ZERO i TEN. USB 115200: pozycja 0..10, ZERO, TEN, STOP, STATUS.");
 }
@@ -1028,7 +998,7 @@ void setup() {
 void loop() {
   feedMainWatchdog();
   const bool ethernet = ETH.hasIP() && ETH.linkUp();
-  const bool wireless = WiFi.status() == WL_CONNECTED;
+  const bool wireless = false; // Wi-Fi deliberately disabled.
   lockMotion();
   ethOnline = ethernet;
   wifiOnline = wireless;
