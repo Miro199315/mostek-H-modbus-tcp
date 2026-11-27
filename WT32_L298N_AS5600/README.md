@@ -1,6 +1,6 @@
 # WT32-ETH01 — klapka 0–10, L298N, AS5600, rynna
-Firmware v4.1. Ethernet 192.168.1.13/24, brama 192.168.1.1.
-Wi-Fi DHCP. Modbus TCP port 502, Unit 1. WWW i OTA port 80.
+Firmware v4.2 Ethernet-only. Ethernet 192.168.1.13/24, brama 192.168.1.1.
+Wi-Fi wylaczone w tej wersji. Modbus TCP port 502, Unit 1. WWW i OTA port 80.
 
 ## Podlaczenie — bez zmian
 Numery GPIO, nie numery kolejnych pinow zlacza.
@@ -82,7 +82,7 @@ Partition Scheme: Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS), min_spiffs.
 Szkic > Eksportuj skompilowany program, a nastepnie otworz
 http://192.168.1.13/update i wgraj WT32_L298N_AS5600.ino.bin.
 Nie wgrywaj merged.bin, bootloader.bin ani partitions.bin przez OTA.
-Po restarcie http://192.168.1.13/ i Ctrl+F5; naglowek ma v4.1.
+Po restarcie http://192.168.1.13/ i Ctrl+F5; naglowek ma v4.2 Ethernet.
 ArduinoOTA rowniez dostepne, host suszarnia-klapka, to samo haslo.
 Pierwsze wgranie i zmiana partycji przez USB-UART.
 OTA zatrzymuje oba napedy; po restarcie nie wznawia ruchu.
@@ -101,7 +101,7 @@ a nie stopnie. Rejestry rynny pozostaja bez zmian.
 | 2 | R | Aktualny PWM rynny |
 | 3 | R | Aktualny kierunek rynny |
 | 4 | R | Rynna odblokowana po STOP |
-| 5 | R | Wersja 410 |
+| 5 | R | Wersja 420 |
 | 6 | RW | Cel klapki 0..100: 25 oznacza 2,5 |
 | 7 | W | 0 STOP klapki, 1 jedz do rejestru 6, 2 zapisz 0, 3 zapisz stare tuning, 4 zapisz 10 |
 | 8 | R | Pozycja skali x10, ograniczona do 0..100; 65535 gdy brak kalibracji/odczytu |
@@ -163,3 +163,23 @@ samego stosu sieciowego, jesli petla programu nadal dziala.
 Nie dodano restartow okresowych ani restartow z powodu braku klienta.
 Konieczna jest dluzsza proba na fizycznej plytce. W razie awarii sprawdz
 ping 192.168.1.13 i lampki RJ45; po powrocie zachowaj dane diagnostyczne.
+
+
+## v4.2 Ethernet-only — test bez Wi-Fi
+Wi-Fi jest calkowicie wylaczone przez WiFi.mode(WIFI_OFF). Nie sa wczytywane
+sieci Wi-Fi, nie ma WiFi.begin, skanowania ani prob ponownego laczenia.
+Strona pokazuje v4.2 Ethernet i Wi-Fi: wylaczone.
+Dane Wi-Fi w secrets.h mozna zachowac; ta wersja ich nie uzywa.
+Haslo WWW/OTA z secrets.h nadal jest wymagane.
+
+WWW: http://192.168.1.13/; OTA: http://192.168.1.13/update przez Ethernet.
+ArduinoOTA rowniez dziala tylko po Ethernecie. Adres 192.168.1.166 nie jest
+dostepny w tej wersji. Uklad partycji, pinout, kalibracja NVS 0-10,
+sterowanie pelna moca i mapa Modbus pozostaja bez zmian poza wersja 420.
+Watchdogi i diagnostyka z v4.1 zachowane. To proba odizolowania przyczyny
+zawieszania, nie potwierdzenie usuniecia usterki.
+
+Pobierz ZIP galezi GitHub, otworz szkic w podfolderze WT32_L298N_AS5600
+i dolacz swoj secrets.h. Kompiluj/eksportuj .ino.bin jak dotychczas.
+Po wgraniu i Ctrl+F5 upewnij sie, ze widzisz Wi-Fi: wylaczone.
+Pozostaw ping 192.168.1.13 -t na czas dluzszej proby.
