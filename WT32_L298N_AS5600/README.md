@@ -1,118 +1,136 @@
-# WT32-ETH01 — L298N, klapka AS5600 i rynna
+# WT32-ETH01 — klapka 0–10, L298N, AS5600, rynna
+Firmware v4.0. Ethernet 192.168.1.13/24, brama 192.168.1.1.
+Wi-Fi DHCP. Modbus TCP port 502, Unit 1. WWW i OTA port 80.
 
-Firmware v3.1 dla WT32-ETH01 z LAN8720. Klapka jest sterowana pierwszym kanalem L298N, a silownik rynny drugim. AS5600 mierzy absolutny kat klapki. IP Ethernet 192.168.1.13, maska 255.255.255.0, brama 192.168.1.1. Wi-Fi pobiera osobny adres przez DHCP.
-
-## Podlaczenie
-
-Numery oznaczaja GPIO, a nie numery fizycznych pinow zlacza.
+## Podlaczenie — bez zmian
+Numery GPIO, nie numery kolejnych pinow zlacza.
 
 | Element | WT32-ETH01 |
 | --- | --- |
-| L298N IN1, klapka | GPIO32, napis CFG |
-| L298N IN2, klapka | GPIO33, napis 485_EN |
+| L298N IN1, klapka | GPIO32 / CFG |
+| L298N IN2, klapka | GPIO33 / 485_EN |
 | L298N IN3, rynna | GPIO14 |
 | L298N IN4, rynna | GPIO4 |
-| AS5600 SDA | GPIO17, napis TXD na glownym zlaczu |
-| AS5600 SCL | GPIO5, napis RXD na glownym zlaczu |
-| AS5600 VCC, modul zgodny z 3,3 V | 3V3 |
-| AS5600 DIR, jezeli dostepny | GND |
-| AS5600 GND, L298N GND, minus zasilacza | Wspolna masa GND |
-| L298N OUT1/OUT2 | Silnik klapki |
-| L298N OUT3/OUT4 | Silownik rynny |
-| L298N ENA/ENB | Zworki zalozone, poziom wysoki |
+| AS5600 SDA | GPIO17 / TXD po lewej stronie |
+| AS5600 SCL | GPIO5 / RXD po lewej stronie |
+| AS5600 VCC | 3V3, modul zgodny z 3,3 V |
+| AS5600 DIR | GND |
+| Wszystkie masy | Wspolne GND ESP, enkodera, L298N i zasilacza |
+| L298N OUT1/2 | Silnik klapki |
+| L298N OUT3/4 | Silownik rynny |
+| L298N ENA i ENB | Zworki / stan wysoki |
 
-Na IN1..IN4 zastosuj po 10 kohm do GND po stronie L298N. WT32 zasil stabilizowanym 5 V. Oba silniki L298N korzystaja ze wspolnego zasilania mocy i musza byc do niego dobrane. Przy 24 V na typowym module zdejmij zworke regulatora 5V-EN i zasil logike osobnym stabilizowanym 5 V zgodnie z oznaczeniami modulu. ENA/ENB to oddzielne zworki. L298N ma limit 2 A na kanal, a rozruch i zablokowanie moga wymagac wiekszego pradu. Testy obciazenia sa konieczne do potwierdzenia doboru.
+WT32 zasil stabilizowanym 5 V. Stosuj krotkie I2C, z dala od przewodow silnika.
+IN1..IN4: po 10 kohm do GND przy sterowniku. Przy 24 V na typowym L298N
+zdejmij zworke regulatora 5V-EN i osobno zasil logike 5 V zgodnie z modulem.
+5V-EN i ENA/ENB to rozne zworki.
+Programowanie: TX0 GPIO1 / RX0 GPIO3, poziomy 3,3 V. GPIO0 do GND tylko na
+czas wejscia w tryb wgrywania; odlacz przed normalnym startem Ethernetu.
 
-Do USB-UART uzyj TX0 GPIO1 i RX0 GPIO3 na zlaczu programowania, sygnaly 3,3 V. Glowny pin TXD GPIO17 jest zajety przez enkoder. GPIO0 do GND sluzy do pierwszego wgrywania; odlacz te zworke przed normalnym uruchomieniem Ethernetu.
+## Nowa skala i kalibracja
+Na stronie nie zadaje sie juz stopni. Skala wynosi 0–10, nastawy co 0,1.
+0 i 10 to zapisane przez uzytkownika pozycje klapki. 5 jest dokladnie
+w polowie przejechanego zakresu; np. 2,5 to 25% zakresu.
+Nie jest to kalibracja przeplywu powietrza — przeplyw moze byc nieliniowy.
 
-## Arduino IDE
+1. Przytrzymuj LEWO lub PRAWO, ustaw pierwszy koniec i pusc przycisk.
+2. Na postoju nacisnij „Zapisz aktualna pozycje jako 0”.
+3. Podjedz recznie do drugiego konca. Podczas przejazdu enkoder musi dzialac.
+4. Pusc przycisk i nacisnij „Zapisz aktualna pozycje jako 10”.
+5. Zadaj np. 2,5, 5 lub 7,8 i nacisnij „Ustaw pozycje”.
 
-1. Zachowaj folder WT32_L298N_AS5600 z plikami .ino, motion.h i secrets.example.h.
-2. Skopiuj swoj dotychczasowy secrets.h suszarni do tego folderu albo skopiuj secrets.example.h jako secrets.h i uzupelnij dane.
-3. Uzywane makra to DRYER_BOOTSTRAP_WIFI, DRYER_BOOTSTRAP_WIFI_PASSWORD, DRYER_BOOTSTRAP_OTA_PASSWORD oraz DRYER_WIFI_NETWORKS. Ostatnie to tekst JSON tablicy ssid/password. Obslugiwanych jest do 6 roznych sieci, lacznie z bootstrap. Puste lub CHANGE_ME haslo wylacza WWW i OTA.
-4. Plytka ESP32 Dev Module, Flash 4 MB, PSRAM Disabled, monitor 115200. Pakiet esp32 by Espressif Systems 3.3.0; biblioteka ArduinoJson 7.4.2.
-5. Partition Scheme wybierz Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS), identyfikator min_spiffs. Pierwsze wgranie przez USB-UART.
+Zakres i kierunek sa zapisane razem w NVS. Po restarcie pozycja jest odczytywana
+z absolutnego AS5600 bez bazowania. Obslugiwany jest zakres od 1 do 350 stopni,
+rowniez przez przejscie surowego odczytu 4095/0 i dluzszy niz pol obrotu.
+Cel jest wybierany wewnatrz zapisanego luku, bez skrotu dookola.
+Zapis nowego 0 uniewaznia stary punkt 10. Nalezy zapisac oba punkty.
+Przerwa w odczycie enkodera lub restart pomiedzy zapisem 0 i 10 wymaga
+ponownego rozpoczecia od 0. Blad zapisu NVS nie podmienia aktywnej kalibracji.
 
-Nowy WT32 ma wlasna pamiec. Raz ustaw klapke na zero i zapisz ZERO przez USB lub przyciskiem na stronie. Restart odczytuje kat z magnesu, bez ruchu bazowania. Ruch odbywa sie najkrotsza droga. 360 stopni oznacza te sama pozycje co 0. Program nie liczy pelnych obrotow po zaniku zasilania.
+Po aktualizacji z v3.x stare ZERO nie jest automatycznie skala. Wymagane
+jest jednorazowe zapisanie 0 i 10. Ustawienia Wi-Fi i haslo sa bez zmian.
 
-Parametry domyslne SPEED 12 stopni/s (2 obr./min), ACCEL 12 stopni/s^2, tolerancja odczytu 0,1 stopnia. Zachowano profil przyspieszania/hamowania i korekty z programu testowego v2.1. Parametry dobierz do rzeczywistego napedu; tolerancja programu nie potwierdza dokladnosci mechanicznej. Czujnik AS5600 ma krok ok. 0,088 stopnia.
+## Ruch i testy
+Klapka jedzie od razu na 100% mocy, zatrzymuje sie przy celu i wykonuje
+krotkie korekty pelna moca. Nastawa ma krok 0,1 jednostki skali; mechaniczna
+dokladnosc zalezy od enkodera, luzow i dobiegu napedu. Wewnetrzna tolerancja
+odczytu pozostaje 0,1 stopnia, nie 0,1 jednostki skali.
+STOP zatrzymuje oba napedy. Bledy enkodera, brak postepu i limit czasu
+zatrzymuja pozycjonowanie. Ruch sieciowy wymaga odswiezania polecen.
 
-## Wspolpraca z obecna suszarnia
+Reczne LEWO/PRAWO jest trybem ustawiania, omija skale i dziala nawet bez
+enkodera. Brak kontroli krancowek. Puszczenie przycisku lub brak jego
+odnowienia przez 500 ms zatrzymuje test; limit nacisniecia 10 s.
+Zmiana kierunku recznego wymaga 700 ms przerwy.
+Zapis punktow skali wymaga postoju obu napedow i prawidlowego AS5600.
 
-Sprawdzono plik firmware/suszarnia/shared/chute_lift.h w repo Miro199315/suszarnia, galaz dryer-io-thermal-20261030. Odbiornik laczy sie na 192.168.1.13:502, Unit ID 1. Najpierw wysyla FC16 do rejestrow 0..1 wartosci [0,0], potem co 100 ms [kierunek,PWM]. Kierunek 1 oznacza gore, 2 dol. PWM 0..1000. Odbiornik juz rozpedza rynne przez 2 sekundy. Firmware WT32 wykonuje ten sam protokol i zwraca 12-bajtowe potwierdzenie oczekiwane przez odbiornik. Zamkniecie sesji zatrzymuje nalezacy do niej naped. Brak odswiezania polecenia przez 1500 ms zatrzymuje rynne i wymaga ponownego STOP przed ruchem. Zmiana kierunku ma minimum 700 ms przerwy od wylaczenia wyjsc.
+W sekcji zaawansowanej zachowano testy impulsow LEWO/PRAWO z v3.3.
+To osobna kalibracja dobiegu: 3 impulsy po 150 ms, przerwy 700 ms,
+wymagane minimum 8 stopni wolnego ruchu. Nie zmienia punktow skali.
 
-Wybrany zakres tej wersji obejmuje zadawanie klapki przez Modbus i lokalna strone. Automatyczne przelaczanie klapki wedlug etapow palnika wymaga wywolan tych rejestrow z odbiornika suszarni. Obecny panel suszarni steruje rynna swoim dotychczasowym protokolem.
+## Arduino i OTA
+Zachowaj pliki .ino, motion.h i secrets.example.h w jednym folderze szkicu.
+Skopiuj swoj secrets.h. Nie publikuj hasel.
+Makra: DRYER_BOOTSTRAP_WIFI, DRYER_BOOTSTRAP_WIFI_PASSWORD,
+DRYER_BOOTSTRAP_OTA_PASSWORD, DRYER_WIFI_NETWORKS (JSON ssid/password).
+Do 6 sieci Wi-Fi. Login WWW: admin; haslo: DRYER_BOOTSTRAP_OTA_PASSWORD.
+Puste haslo lub CHANGE_ME wylacza WWW i OTA.
 
-## Mapa Modbus TCP
+Arduino-ESP32 3.3.0, ArduinoJson 7.4.2.
+ESP32 Dev Module, Flash 4 MB, PSRAM Disabled.
+Partition Scheme: Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS), min_spiffs.
+Szkic > Eksportuj skompilowany program, a nastepnie otworz
+http://192.168.1.13/update i wgraj WT32_L298N_AS5600.ino.bin.
+Nie wgrywaj merged.bin, bootloader.bin ani partitions.bin przez OTA.
+Po restarcie http://192.168.1.13/ i Ctrl+F5; naglowek ma v4.0.
+ArduinoOTA rowniez dostepne, host suszarnia-klapka, to samo haslo.
+Pierwsze wgranie i zmiana partycji przez USB-UART.
+OTA zatrzymuje oba napedy; po restarcie nie wznawia ruchu.
+Przerwany zapis zachowuje stara aplikacje, jesli nie zatwierdzono nowej partycji.
+Nie ma automatycznej oceny nowego programu ani gwarancji rollback po zawieszeniu.
 
-Port 502, Unit ID 1. Obslugiwane FC03, FC04, FC06 i FC16. Maksymalnie 3 klientow. Adresy ponizej sa liczone od zera; rejestr 0 bywa pokazywany jako 40001.
+## Modbus TCP v4.0
+Adresy ponizej liczone od zera. FC03/04/06/16, maksymalnie 3 klientow.
+UWAGA: rejestry klapki 6 i 8 maja od v4.0 jednostki nowej skali,
+a nie stopnie. Rejestry rynny pozostaja bez zmian.
 
 | Adres | Dostep | Znaczenie |
 | --- | --- | --- |
-| 0 | RW | Kierunek rynny 0 STOP, 1 gora, 2 dol |
-| 1 | RW | PWM zadane rynny 0..1000 |
-| 2 | R | Aktualne PWM rynny 0..1000 |
+| 0 | RW | Rynna: 0 STOP, 1 gora, 2 dol |
+| 1 | RW | PWM rynny 0..1000 |
+| 2 | R | Aktualny PWM rynny |
 | 3 | R | Aktualny kierunek rynny |
-| 4 | R | Rynna odblokowana po STOP, 0/1 |
-| 5 | R | Wersja firmware 310 |
-| 6 | RW | Kat zadany klapki 0..3600, jednostka 0,1 stopnia |
-| 7 | W | Polecenie klapki 0 STOP, 1 jedz do rejestru 6, 2 ZERO, 3 zapisz SPEED i ACCEL |
-| 8 | R | Aktualny kat klapki 0..3599, jednostka 0,1 stopnia |
-| 9 | R | Flagi klapki, opis nizej |
-| 10 | RW | SPEED 10..120, jednostka 0,1 stopnia/s |
-| 11 | RW | ACCEL i hamowanie 10..1200, jednostka 0,1 stopnia/s^2 |
-| 12 | R | Blad klapki 0 brak, 1 blad ruchu/czujnika, 2 utrata sterowania, 3 blad zapisu zera |
-| 13 | RW | Heartbeat klapki, dowolna wartosc z tej samej sesji TCP co polecenie jazdy |
-| 14 | W | 1 zatrzymuje oba napedy i blokuje rynne do nowego STOP |
-| 15 | R | Surowy odczyt AS5600 0..4095 |
+| 4 | R | Rynna odblokowana po STOP |
+| 5 | R | Wersja 400 |
+| 6 | RW | Cel klapki 0..100: 25 oznacza 2,5 |
+| 7 | W | 0 STOP klapki, 1 jedz do rejestru 6, 2 zapisz 0, 3 zapisz stare tuning, 4 zapisz 10 |
+| 8 | R | Pozycja skali x10, ograniczona do 0..100; 65535 gdy brak kalibracji/odczytu |
+| 9 | R | Flagi: PWM gotowe 1, enkoder OK 2, oba konce zapisane 4, ruch 8, cel osiagniety 16, blad 32, OTA 64 |
+| 10 | RW | Stare SPEED x10, 10..120, bez wplywu na klapke przy pelnej mocy |
+| 11 | RW | Stare ACCEL x10, 10..1200, bez wplywu na klapke przy pelnej mocy |
+| 12 | R | Blad: 0 brak, 1 ruch/czujnik, 2 komunikacja, 3 zapis NVS |
+| 13 | RW | Heartbeat klapki, zapis w tej samej sesji TCP co GO |
+| 14 | W | 1 STOP obu napedow i rozbrojenie rynny |
+| 15 | R | Surowy AS5600 0..4095 |
 
-Flagi rejestru 9: bit 0 PWM gotowe, bit 1 czujnik OK, bit 2 zero zapisane, bit 3 ruch klapki, bit 4 cel osiagniety w tolerancji, bit 5 blad, bit 6 aktualizacja OTA. Odczyt rejestrow 7 i 14 zwraca 0.
+Przyklad po kalibracji: FC16 adres6 wartosci [75,1] ustawia klapke na 7,5.
+Zapisuj rejestr13 co 500 ms w tej samej sesji az do konca ruchu.
+Odczyt statusu nie odnawia heartbeat. Limit 1500 ms; zamkniecie sesji lub
+utrata sieci zatrzymuje nalezacy do niej ruch. WWW odnawia swoj ruch co 400 ms.
+Kalibracja obu koncow i zadawanie pozycji sa tez dostepne z WWW i USB.
 
-Rynna i klapka maja osobne sesje wlascicieli. Sesja rynny moze sie zamknac po puszczeniu przycisku bez przerywania klapki sterowanej przez innego klienta.
+Rynna: zgodnosc ChuteLift suszarni zachowana. FC16 adres0 wartosci [0,0]
+odblokowuje; potem co 100 ms [kierunek,PWM]. Zamkniecie sesji zatrzymuje
+rynne. Przerwa kierunkow minimum 700 ms. Odbiornik suszarni juz rampuje PWM.
+Automatyczne przestawianie klapki wedlug etapu palnika wymaga wywolan
+nowych rejestrow z odbiornika; nie dodano tego w tej aktualizacji.
 
-Przyklad dla klapki 35 stopni: FC16 do adresu 6, dwie wartosci [350,1]. W tej samej sesji TCP zapisuj rejestr 13 co 500 ms az do zakonczenia przejazdu. Zanik heartbeat przez 1500 ms, utrata polaczenia albo odczytu czujnika zatrzymuje klapke. Sam odczyt statusu nie odnawia heartbeat. Nowe polecenie ruchu jest wymagane do ponownego uruchomienia. Parametry zmieniaj na postoju, np. rejestr 10=120 oraz 11=240 dla SPEED 12 i ACCEL 24. Zapisz ustawienia poleceniem 3 do rejestru 7.
-
-## Strona lokalna i OTA przez Wi-Fi
-
-Otworz http://192.168.1.13/ przez Ethernet lub http://ADRES_WIFI/ przez Wi-Fi. Adres Wi-Fi jest wypisywany na USB. Login admin, haslo DRYER_BOOTSTRAP_OTA_PASSWORD. Strona pozwala zadac kat, zapisac zero i parametry oraz zatrzymac oba napedy. Otwarta strona odswieza heartbeat ruchu, ktory sama uruchomila. Zamkniecie strony zatrzymuje taki ruch po maksymalnie 1500 ms.
-
-Przegladarkowe OTA jest pod /update. W Arduino IDE wybierz Szkic > Eksportuj skompilowany program. Wgraj plik aplikacji WT32_L298N_AS5600.ino.bin. Zapis do drugiej partycji zaczyna sie po uwierzytelnieniu i zatrzymaniu obu napedow. Przerwany zapis pozostawia dotychczasowa aplikacje, jesli nie zakonczono poprawnie wyboru nowej partycji. Uruchomienie nowego firmware wymaga fizycznego sprawdzenia; nie dodano automatycznej oceny dzialania nowej aplikacji ani gwarancji powrotu po jej zawieszeniu.
-
-Dostepne jest takze ArduinoOTA z Arduino IDE, host suszarnia-klapka, to samo haslo. Pierwsze wgranie i zmiane ukladu partycji wykonaj przez USB-UART. Aktualizacja zatrzymuje napedy; restart pozostawia je w stanie zatrzymanym. Protokol Modbus i lokalna strona wymagaja nowych polecen po aktualizacji. Parametry i zero zapisane w NVS pozostaja przy aktualizacji bez kasowania pamieci.
-
-## USB
-
-115200, Nowa linia. Dostepne STATUS, ZERO, kat jako liczba, SPEED 12, ACCEL 12, SAVE, STOP. SAVE zapisuje parametry do NVS. USB sluzy do testow; polecenie ruchu z USB ma wlasny limit czasu i nie wymaga sieciowego heartbeat.
-
-## Diagnostyka na stronie w wersji 3.1
-
-Strona pokazuje opis przyczyny zatrzymania, wskazowke co sprawdzic, kat i cel w chwili bledu oraz zadane PWM przed zatrzymaniem. Rejestr 12 zachowuje dotychczasowe kategorie 0..3. Szczegolowy kod i tekst sa dostepne w /api/status. STOP zachowuje opis do odczytania; nowe przyjete polecenie ruchu lub poprawny zapis ZERO kasuja poprzedni blad. Informacja o przyczynie jest przechowywana do restartu.
-
-Kody szczegolowe: 1 komunikacja I2C, 2 brak magnesu, 3 zbyt slabe pole, 4 zbyt silne pole, 5 przeciwny kierunek, 6 brak postepu 1,5 s, 7 limit czasu dojazdu, 8 nieosiagnieta tolerancja po korektach, 9 utrata sieci, 10 brak heartbeat, 11 zamkniecie sesji Modbus, 12 blad zapisu zera, 13 blad PWM, 14 blad zadania sterowania.
-
-Komunikat o braku ruchu opisuje obserwacje enkodera i polecenie PWM. Sterownik nie mierzy napiecia ani pradu silnika, wiec podane przyczyny elektryczne sa wskazowkami do sprawdzenia. Po aktualizacji odswiez strone przez Ctrl+F5 i ponow probe, aby otrzymac nowy szczegolowy blad.
-
-
-## v3.2 — reczny test bez enkodera
-Na stronie WWW przytrzymaj LEWO/PRAWO, moc 1–100% (domyslnie 100%).
-Tryb nie wymaga AS5600 ani ZERO i nie kontroluje pozycji ani konca mechanicznego.
-Puszczenie przycisku, utrata aktywnosci okna lub STOP zatrzymuje test.
-Brak odnowienia polecenia przez 500 ms zatrzymuje silnik; limit pojedynczego testu 10 s.
-Przed zmiana kierunku obowiazuje przerwa 700 ms.
-OTA oraz globalny STOP zatrzymuja takze test. Pozycjonowanie nadal wymaga enkodera.
-Pinout bez zmian. Wersja w rejestrze 5: 320.
-
-
-## v3.3 — pelna moc i kalibracja impulsow
-Klapka od razu jedzie z PWM 255 (100%), bez rampy. Przy celu wylacza naped,
-czeka 700 ms i koryguje pelna moca przez impulsy 5–100 ms.
-Kalibruj LEWO/PRAWO na stronie: wymagany sprawny AS5600 i minimum 8 stopni
-wolnego ruchu w kierunku testu. Trzy impulsy po 150 ms, z przerwami 700 ms,
-mierza ruch i dobieg. Wynik danego kierunku zapisuje sie w NVS.
-Zapisane ZERO nie zmienia sie. Kalibracja nie wymaga zapisanego ZERO.
-Utrata enkodera/heartbeat i STOP przerywaja kalibracje. Nie ma kontroli krancowek.
-Reczny test bez enkodera tez zawsze 100%. Tolerancja 0,1 stopnia pozostaje
-kryterium programu, nie gwarancja dokladnosci mechanizmu.
-Stare SPEED/ACCEL i rejestry 10/11 pozostaja kompatybilne, ale nie steruja juz
-predkoscia klapki. Rynna Modbus nadal korzysta z zadanego PWM.
-Wersja rejestru 5: 330. Po aktualizacji Ctrl+F5: naglowek v3.3.
+## USB i diagnostyka
+115200, Nowa linia: ZERO zapis0, TEN zapis10, liczba np. 2,5 albo 7.8,
+STOP, STATUS. Skala z USB rowniez wymaga obu punktow.
+WWW pokazuje pozycje i cel w nowej skali, stan enkodera, kalibracje,
+polecenie PWM i szczegolowy opis bledow. /api/status zachowuje techniczne
+pola angle/target dla diagnostyki; nowe scale/scaleTarget sa jednostkami skali.
+Polecenie WWW move przyjmuje pole scale, nie stare angle.
+STOP zachowuje ostatni blad; nowe przyjete polecenie lub poprawny zapis
+punktu skali go kasuje. Blad nie jest zapisywany przez restart.
