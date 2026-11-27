@@ -16,7 +16,7 @@ constexpr uint32_t LIFT_PULSE_MS = 300;
 constexpr uint32_t LIFT_PAUSE_MS = 200;
 constexpr int ENCODER_SIGN = 1; // Set -1 if opening decreases encoder angle.
 constexpr bool MOTOR_REVERSE = false; // Reverse flap motor direction here if needed.
-constexpr float MAX_ANGLE = 360.0f; // Set to actual mechanical travel before testing.
+constexpr float MAX_ANGLE = 10.0f; // Set to actual mechanical travel before testing.
 constexpr float TOLERANCE = 0.1f;
 constexpr uint32_t MOVE_TIMEOUT_MS = 60000;
 constexpr uint32_t STALL_TIMEOUT_MS = 1500;
@@ -46,6 +46,12 @@ void clearMotionFault() {
 
 
 bool calibrated = false, sensorOK = false, moving = false;
+bool scaleZeroSaved = false, scaleCaptureActive = false;
+float scaleSpan = 0;
+float scaleTarget = 0;
+const char* scaleMessage = "Zapisz pozycje 0, podjedz recznie do drugiego konca i zapisz 10.";
+struct ScaleCalibration { uint32_t magic; uint32_t zero; float span; };
+constexpr uint32_t SCALE_MAGIC = 0x53434C34;
 bool manualJog = false, calibratingMotor = false;
 float msPerDegree[2] = {83.333f, 83.333f};
 float stopLead[2] = {0, 0};
@@ -98,13 +104,46 @@ float angleDifference(float to, float from) {
   return difference > 180.0f ? difference - 360.0f : difference;
 }
 
+// Absolute single-turn coordinate along the calibrated arc, including arcs >180 degrees.
+float scalePositionDegrees(float encoderAngle) {
+  const float sign = scaleSpan >= 0 ? 1.0f : -1.0f;
+  const float length = fabsf(scaleSpan);
+  float directed = wrap360(sign * encoderAngle);
+  // Choose the representation nearest the calibrated interval; never a shortest-path target.
+  if (directed > length && directed - length > 360.0f - directed) directed -= 360.0f;
+  return directed * sign;
+}
+
+float scaleReading() {
+  return calibrated ? position * 10.0f / scaleSpan : 0;
+}
+
+float faultScaleReading(float degrees) {
+  return calibrated ? degrees * 10.0f / scaleSpan : 0;
+}
+
+void loadScaleCalibration() {
+  ScaleCalibration saved{};
+  calibrated = scaleZeroSaved = scaleCaptureActive = false;
+  scaleSpan = 0;
+  if (settings.getBytes("scale4", &saved, sizeof(saved)) != sizeof(saved) ||
+      saved.magic != SCALE_MAGIC || saved.zero > 4095 || !isfinite(saved.span)) return;
+  if (saved.span != 0 && (fabsf(saved.span) < 1.0f || fabsf(saved.span) > 350.0f)) return;
+  zeroAngle = uint16_t(saved.zero);
+  scaleZeroSaved = true;
+  scaleSpan = saved.span;
+  calibrated = scaleSpan != 0;
+  scaleMessage = calibrated ? "Wczytano skale 0-10." :
+    "Zapisano tylko 0. Po restarcie zapisz 0 ponownie przed dojazdem do 10.";
+}
+
 void recordMotionFault(uint16_t category, uint16_t reason, const char* message, const char* hint) {
   motionFault = category;
   motionFaultReason = reason;
   motionFaultText = message;
   motionFaultHint = hint;
-  faultAngle = angle;
-  faultTarget = target;
+  faultAngle = position;
+  faultTarget = goalPosition;
   faultOutputPwm = flapOutputPwm;
 }
 
@@ -140,7 +179,7 @@ bool readBytes(uint8_t reg, uint8_t* data, uint8_t length) {
   return true;
 }
 
-bool readEncoder() {
+bool sampleEncoder() {
   uint8_t status, bytes[2];
   if (!readBytes(0x0B, &status, 1)) { encoderFault = 1; return false; }
   // MD must be set; ML and MH must both be clear.
@@ -166,8 +205,65 @@ bool readEncoder() {
       measuredSpeed += blend * (delta / dt - measuredSpeed);
     }
   }
+  if (calibrated) position = scalePositionDegrees(angle);
   previousAngle = angle;
   previousEncoderTime = sampleTime;
+  return true;
+}
+
+bool readEncoder() {
+  const bool ok = sampleEncoder();
+  if (!ok) {
+    trackingReady = false;
+    if (scaleCaptureActive) {
+      scaleCaptureActive = false;
+      scaleMessage = "Przerwano pomiar zakresu: blad enkodera. Zapisz 0 ponownie.";
+    }
+  }
+  return ok;
+}
+
+bool saveScaleZero() {
+  if (moving || !sensorOK) return false;
+  const ScaleCalibration saved{SCALE_MAGIC, rawAngle, 0};
+  if (settings.putBytes("scale4", &saved, sizeof(saved)) != sizeof(saved)) {
+    recordMotionFault(3, 12, "Nie zapisano punktu 0.", "Poprzednia kalibracja pozostaje aktywna.");
+    return false;
+  }
+  zeroAngle = rawAngle;
+  scaleZeroSaved = scaleCaptureActive = true;
+  calibrated = false;
+  scaleSpan = 0;
+  scaleTarget = 0;
+  angle = target = position = goalPosition = 0;
+  trackingReady = false;
+  clearMotionFault();
+  scaleMessage = "Punkt 0 zapisany. Podjedz recznie do punktu 10 i zatrzymaj silnik.";
+  return true;
+}
+
+bool saveScaleTen() {
+  if (moving || !sensorOK || !scaleCaptureActive || !scaleZeroSaved) {
+    scaleMessage = "Najpierw zapisz 0, podjedz recznie i zatrzymaj silnik.";
+    return false;
+  }
+  if (!isfinite(position) || fabsf(position) < 1.0f || fabsf(position) > 350.0f) {
+    scaleMessage = "Zakres zbyt maly lub obejmuje prawie pelny obrot. Zapisz 0 i 10 ponownie.";
+    return false;
+  }
+  const ScaleCalibration saved{SCALE_MAGIC, zeroAngle, position};
+  if (settings.putBytes("scale4", &saved, sizeof(saved)) != sizeof(saved)) {
+    recordMotionFault(3, 12, "Nie zapisano punktu 10.", "Powtorz zapis punktu 10.");
+    return false;
+  }
+  scaleSpan = position;
+  calibrated = true;
+  scaleCaptureActive = false;
+  scaleTarget = 10;
+  target = angle;
+  goalPosition = position;
+  clearMotionFault();
+  scaleMessage = "Skala 0-10 zapisana. Mozesz zadawac pozycje co 0,1.";
   return true;
 }
 
@@ -236,6 +332,11 @@ void updateFlap(uint32_t now) {
     return;
   }
   const float error = goalPosition - position;
+  if (calibrated && ((position < fminf(0, scaleSpan) - TOLERANCE && error < 0) ||
+                     (position > fmaxf(0, scaleSpan) + TOLERANCE && error > 0))) {
+    failFlap(15, "Ruch poza skalibrowanym zakresem.", "Sprawdz zapis pozycji 0 i 10.");
+    return;
+  }
   if (settling) {
     if (now - phaseStarted < 700) return;
     settling = false;
@@ -244,7 +345,8 @@ void updateFlap(uint32_t now) {
   }
   if (correcting) {
     if (correctionPulse) {
-      if (now - phaseStarted >= correctionDuration) {
+      if (now - phaseStarted >= correctionDuration || fabsf(error) <= TOLERANCE ||
+          ((error > 0 ? 1 : -1) != motionSign)) {
         flapOff();
         correctionPulse = false;
         settling = true;
@@ -259,6 +361,7 @@ void updateFlap(uint32_t now) {
     }
     const int direction = error > 0 ? 1 : -1;
     correctionDuration = uint32_t(constrain(fabsf(error) * msPerDegree[direction > 0 ? 1 : 0] * 0.5f, 5.0f, 100.0f));
+    motionSign = direction;
     driveFull(direction);
     correctionPulse = true;
     phaseStarted = now;
@@ -287,9 +390,9 @@ void updateFlap(uint32_t now) {
 }
 
 void printStatus() {
-  Serial.printf("AS5600=%s raw=%u zero=%s kat=%.2f cel=%.2f ruch=%d rynna=%d v=%.2f vmax=%.2f accel=%.2f\n",
-                sensorOK ? "OK" : "BLAD", unsigned(rawAngle),
-                calibrated ? "TAK" : "NIE", angle, target, moving, liftDirection, measuredSpeed, maxSpeed, acceleration);
+  Serial.printf("AS5600=%s skala=%s pozycja=%.2f cel=%.1f ruch=%d rynna=%d\n",
+    sensorOK ? "OK" : "BLAD", calibrated ? "0-10" : "wymaga kalibracji",
+    scaleReading(), scaleTarget, moving, liftDirection);
 }
 
 void motionCommand(char* line) {
@@ -304,26 +407,12 @@ void motionCommand(char* line) {
     Serial.println("STOP wszystkich napedow.");
   } else if (strcmp(line, "STATUS") == 0) {
     printStatus();
-  } else if (strcmp(line, "ZERO") == 0) {
-    stopFlap();
-    stopLift();
+  } else if (strcmp(line, "ZERO") == 0 || strcmp(line, "TEN") == 0) {
+    if (moving) { Serial.println("Najpierw STOP."); return; }
     sensorOK = readEncoder();
-    if (!sensorOK) {
-      Serial.println("Brak poprawnego odczytu AS5600.");
-      return;
-    }
-    if (settings.putUInt("zero", rawAngle) != sizeof(uint32_t)) {
-      recordMotionFault(3, 12, "Nie udalo sie zapisac pozycji zerowej w pamieci.", "Poprzednie odniesienie zostalo zachowane. Sprawdz zasilanie i pamiec NVS.");
-      Serial.println("BLAD zapisu zera. Zachowano poprzednie odniesienie.");
-      return;
-    }
-    zeroAngle = rawAngle;
-    calibrated = true;
-    clearMotionFault();
-    angle = target = 0;
-    position = 0;
-    trackingReady = false;
-    Serial.println(calibrated ? "Zero zapisane." : "BLAD zapisu zera.");
+    if (!sensorOK) { Serial.println(encoderFaultText()); return; }
+    const bool ok = strcmp(line, "ZERO") == 0 ? saveScaleZero() : saveScaleTen();
+    Serial.println(ok ? scaleMessage : (motionFault == 3 ? motionFaultText : scaleMessage));
   } else if (gotoCommand || numericCommand) {
     if (moving) {
       Serial.println("Najpierw STOP przed nowym GOTO.");
@@ -334,15 +423,16 @@ void motionCommand(char* line) {
     const float value = strtof(number, &end);
     sensorOK = readEncoder();
     if (end == number || *end != '\0' || !isfinite(value) ||
-        value < 0 || value > MAX_ANGLE || !calibrated || !sensorOK) {
-      Serial.println("GOTO odrzucone: sprawdz kat, ZERO i AS5600.");
+        value < 0 || value > 10 || fabsf(value * 10 - roundf(value * 10)) > 0.001f || !calibrated || !sensorOK) {
+      Serial.println("Pozycja odrzucona: skala 0-10 co 0,1; wymagane zapisane 0 i 10 oraz enkoder.");
       return;
     }
     clearMotionFault();
-    target = wrap360(value);
+    scaleTarget = roundf(value * 10) / 10;
+    target = wrap360(scaleSpan * scaleTarget / 10);
     startPosition = position;
-    initialError = angleDifference(target, angle);
-    goalPosition = position + initialError;
+    goalPosition = scaleSpan * scaleTarget / 10;
+    initialError = goalPosition - position;
     motionSign = initialError >= 0 ? 1 : -1;
     profileDistance = fabsf(initialError);
     peakSpeed = fminf(maxSpeed, sqrtf(profileDistance * acceleration));
@@ -370,7 +460,7 @@ void motionCommand(char* line) {
     else acceleration = value;
     printStatus();
   } else {
-    Serial.println("Komendy: STATUS, ZERO, 10 lub GOTO 10, STOP, SPEED 12, ACCEL 12");
+    Serial.println("Komendy: STATUS, ZERO (punkt 0), TEN (punkt 10), pozycja 0..10 co 0,1, STOP");
   }
 }
 
