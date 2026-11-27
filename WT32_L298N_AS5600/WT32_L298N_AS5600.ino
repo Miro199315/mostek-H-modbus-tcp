@@ -29,7 +29,7 @@
 #define DRYER_WIFI_NETWORKS "[]"
 #endif
 
-constexpr uint16_t FIRMWARE_VERSION = 330;
+constexpr uint16_t FIRMWARE_VERSION = 400;
 constexpr unsigned CLIENT_COUNT = 3;
 constexpr int NO_OWNER = -1, WEB_OWNER = 100, USB_OWNER = 101;
 constexpr uint32_t LEASE_MS = 1500;
@@ -162,10 +162,10 @@ uint16_t registerValue(uint16_t reg) {
     case 5: return FIRMWARE_VERSION;
     case 6: return stagedTarget;
     case 7: return 0;
-    case 8: return uint16_t(lroundf(angle * 10)) % 3600;
+    case 8: return sensorOK && calibrated ? uint16_t(constrain(lroundf(scaleReading() * 10), 0L, 100L)) : 0xFFFF;
     case 9: return (driverReady ? 1 : 0) | (sensorOK ? 2 : 0) | (calibrated ? 4 : 0) |
                    (moving ? 8 : 0) | ((!moving && calibrated && sensorOK &&
-                    fabsf(angleDifference(target, angle)) <= TOLERANCE) ? 16 : 0) |
+                    fabsf(goalPosition - position) <= TOLERANCE) ? 16 : 0) |
                    (motionFault ? 32 : 0) | (maintenance ? 64 : 0);
     case 10: return lroundf(maxSpeed * 10);
     case 11: return lroundf(acceleration * 10);
@@ -205,8 +205,8 @@ uint8_t applyRegisters(unsigned index, uint16_t address, uint16_t count, const u
     switch (address + i) {
       case 0: if (value > 2) return 3; direction = value; directionWritten = true; break;
       case 1: if (value > 1000) return 3; pwm = value; pwmWritten = true; break;
-      case 6: if (value > 3600) return 3; destination = value; break;
-      case 7: if (value > 3) return 3; command = value; break;
+      case 6: if (value > 100) return 3; destination = value; break;
+      case 7: if (value > 4) return 3; command = value; break;
       case 10: if (value < 10 || value > 120) return 3; speed = value; break;
       case 11: if (value < 10 || value > 1200) return 3; accel = value; break;
       case 13: heartbeat = value; heartbeatWritten = true; break;
@@ -220,7 +220,8 @@ uint8_t applyRegisters(unsigned index, uint16_t address, uint16_t count, const u
   if (pwmWritten && !directionWritten && liftCommand && liftOwner != int(index)) return 6;
   if ((speed != lroundf(maxSpeed * 10) || accel != lroundf(acceleration * 10)) && moving) return 6;
   if (command == 1 && (moving || !sensorOK || !calibrated)) return 6;
-  if (command == 2 && (moving || !sensorOK || liftCommand || (directionWritten && direction))) return 6;
+  if ((command == 2 || command == 4) && (moving || !sensorOK || liftCommand || (directionWritten && direction))) return 6;
+  if (command == 4 && (!scaleCaptureActive || fabsf(position) < 1 || fabsf(position) > 350)) return 3;
   if (command == 3 && moving) return 6;
   const float oldSpeed = maxSpeed, oldAccel = acceleration;
   maxSpeed = speed / 10.0f;
@@ -230,10 +231,10 @@ uint8_t applyRegisters(unsigned index, uint16_t address, uint16_t count, const u
     acceleration = oldAccel;
     return 6;
   }
-  if (command == 2) {
-    char zero[] = "ZERO";
-    motionCommand(zero);
-    if (!calibrated || !sensorOK || motionFault == 3) { maxSpeed = oldSpeed; acceleration = oldAccel; return 4; }
+  if (command == 2 || command == 4) {
+    sensorOK = readEncoder();
+    const bool saved = sensorOK && (command == 2 ? saveScaleZero() : saveScaleTen());
+    if (!saved) { maxSpeed = oldSpeed; acceleration = oldAccel; return 4; }
   }
   if (command == 3 && !saveTuning()) { maxSpeed = oldSpeed; acceleration = oldAccel; return 4; }
   // A write of 0 to register 7 is an explicit flap STOP.
@@ -389,21 +390,28 @@ void endFailedMaintenance() {
 const char CONTROL_PAGE[] PROGMEM = R"html(<!doctype html><html lang="pl"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Klapka suszarni</title>
 <style>body{font:17px system-ui;margin:24px auto;padding:0 16px;max-width:600px;background:#f5f6f4;color:#183426}section{background:white;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,button{font:inherit;padding:10px;box-sizing:border-box;max-width:100%}input{width:150px}button{cursor:pointer;margin:4px;background:#1c6042;color:white;border:0;border-radius:6px}#stop{background:#ad302a}#state{white-space:pre-line}#message{min-height:28px}#faultBox{background:#fff0ed;border:2px solid #ad302a;color:#76241d;padding:16px;border-radius:8px;margin-top:16px}#faultBox p{margin:8px 0}#faultDetails{font-size:14px}a{color:#1c6042}</style>
-<h1>Klapka suszarni <small>v3.3</small></h1><section><div id="state">Laczenie...</div>
+<h1>Klapka suszarni <small>v4.0</small></h1><section><div id="state">Laczenie...</div>
 <div id="faultBox" role="alert" hidden><strong id="faultText"></strong><p id="faultHint"></p><p id="faultDetails"></p></div></section>
-<section><label>Kat zadany [°] <input id="angle" type="number" min="0" max="360" step="0.1" value="30"></label>
-<button onclick="act('move')">Ustaw kat</button><button id="stop" onclick="act('stop')">STOP obu napedow</button>
+<section><label>Pozycja zadana [0–10] <input id="angle" type="number" min="0" max="10" step="0.1" value="5"></label>
+<button onclick="act('move')">Ustaw pozycje</button><button id="stop" onclick="act('stop')">STOP obu napedow</button>
 <div hidden><label>Predkosc [°/s] <input id="speed" type="number" min="1" max="12" step="0.1" value="12"></label>
 <label>Przyspieszenie i hamowanie [°/s²] <input id="accel" type="number" min="1" max="120" step="0.1" value="12"></label>
 <button onclick="act('tune')">Zastosuj parametry</button><button onclick="act('save')">Zapisz parametry</button>
-</div><p>Jazda od razu na 100% mocy. Przy celu korekty impulsami 100%.</p><p>Ustaw mechanizm w pozycji zerowej przed zapisaniem odniesienia.</p><button onclick="act('zero')">Zapisz aktualna pozycje jako zero</button>
+</div><p>Jazda od razu na 100% mocy. Przy celu korekty impulsami 100%.</p>
+<h2>Kalibracja skali 0–10</h2>
+<p>1. Przyciskami LEWO/PRAWO ustaw pierwszy koniec, pusc przycisk i zapisz 0.</p>
+<button onclick="act('zero')">Zapisz aktualna pozycje jako 0</button>
+<p>2. Podjedz recznie do drugiego konca, pusc przycisk i zapisz 10. Sterownik zapamieta kierunek oraz caly przejechany zakres.</p>
+<button onclick="act('ten')">Zapisz aktualna pozycje jako 10</button>
+<p id="scaleInfo"></p>
+<details><summary>Zaawansowane: dobieranie impulsow silnika</summary>
 <h2>Kalibracja napedu — pelna moc</h2>
 <p>Enkoder wymagany. Zapewnij co najmniej 8° wolnego ruchu w wybranym kierunku. Test wykona 3 impulsy po 150 ms i zapisze czas ruchu na stopien oraz dobieg. Wykonaj osobno dla obu kierunkow.</p>
 <button onclick="act('calleft')">Kalibruj LEWO</button>
 <button onclick="act('calright')">Kalibruj PRAWO</button>
-<p id="calibration"></p>
-<h2>Test silnika bez enkodera — 100%</h2>
-<p>Przytrzymaj przycisk. Bez kontroli kata i krancowek; maksymalnie 10 s na nacisniecie.</p>
+<p id="calibration"></p></details>
+<h2>Reczne ustawianie klapki — 100%</h2>
+<p>Przytrzymaj przycisk. Ruch reczny omija skale i dziala takze bez enkodera; maksymalnie 10 s na nacisniecie.</p>
 <label hidden>Moc [%] <input id="power" type="number" min="1" max="100" value="100"></label>
 <button class="jog" data-direction="-1" style="touch-action:none">Przytrzymaj: LEWO</button>
 <button class="jog" data-direction="1" style="touch-action:none">Przytrzymaj: PRAWO</button>
@@ -419,7 +427,7 @@ async function post(action, extra = {}) {
     token,
     action,
     ...extra,
-    angle: document.querySelector('#angle').value,
+    scale: document.querySelector('#angle').value,
     speed: document.querySelector('#speed').value,
     accel: document.querySelector('#accel').value
   });
@@ -451,23 +459,24 @@ async function poll() {
     alive = state.moving && state.webOwner;
     document.querySelector('#state').textContent = [
       `Tryb: ${state.manual ? "TEST BEZ ENKODERA" : "pozycjonowanie"}`,
-      `Kat: ${state.sensor ? state.angle.toFixed(2) + "°" : "brak odczytu"}`,
-      `Cel: ${state.target.toFixed(1)}°`,
+      `Pozycja: ${state.scaleValid ? state.scale.toFixed(2) : "wymaga kalibracji lub odczytu enkodera"}`,
+      `Cel: ${state.scaleTarget.toFixed(1)}`,
       `AS5600: ${state.sensor ? 'OK' : state.encoderText}`,
-      `Zero: ${state.calibrated ? 'zapisane' : 'wymagane'}`,
+      `Skala 0-10: ${state.calibrated ? 'zapisane' : 'wymaga kalibracji'}`,
       `Klapka: ${state.moving ? 'ruch' : 'postoj'} | PWM zadane: ${Math.round(state.pwm * 100 / 255)}%`,
       `Wyjscia: ${state.ready ? 'gotowe' : 'BLAD'} | OTA: ${state.maintenance ? 'aktualizacja' : 'postoj'}`,
       `Rynna: ${state.lift}`,
       `Ethernet: ${state.eth} | Wi-Fi: ${state.wifi}`
     ].join('\n');
+    document.querySelector('#scaleInfo').textContent = state.scaleMessage;
     document.querySelector('#calibration').textContent = state.calibrationText +
       ' | LEWO: ' + state.msLeft.toFixed(1) + ' ms/° | PRAWO: ' + state.msRight.toFixed(1) + ' ms/°';
     document.querySelector('#faultBox').hidden = !state.fault;
     document.querySelector('#faultText').textContent = state.faultText;
     document.querySelector('#faultHint').textContent = state.faultHint;
     document.querySelector('#faultDetails').textContent =
-      `Kod ${state.faultReason} | Ostatni odczyt kata: ${state.faultAngle.toFixed(2)}° | ` +
-      `Cel: ${state.faultTarget.toFixed(1)}° | PWM zadane przed zatrzymaniem: ` +
+      `Kod ${state.faultReason} | PWM zadane przed zatrzymaniem: ` +
+
       `${Math.round(state.faultPwm * 100 / 255)}%.`;
     if (!loaded) {
       document.querySelector('#speed').value = state.speed;
@@ -481,9 +490,14 @@ async function poll() {
   }
 }
 
+let jogGeneration = 0;
 let held = false, jogTimer = null, jogLimit = null, jogQueue = Promise.resolve();
 function queueJog(action, extra = {}) {
-  jogQueue = jogQueue.then(() => post(action, extra)).then(text => {
+  const generation = jogGeneration;
+  jogQueue = jogQueue.then(() => {
+    if (action === 'jog' && (!held || generation !== jogGeneration)) return '';
+    return post(action, extra);
+  }).then(text => {
     document.querySelector('#message').textContent = text;
   }).catch(error => {
     document.querySelector('#message').textContent = error.message;
@@ -502,6 +516,7 @@ for (const button of document.querySelectorAll('.jog')) {
     if (held || event.button !== 0) return;
     event.preventDefault();
     held = true;
+    ++jogGeneration;
     button.setPointerCapture(event.pointerId);
     const extra = {direction: button.dataset.direction, power: document.querySelector('#power').value};
     queueJog('jog', extra);
@@ -541,6 +556,11 @@ void setupWeb() {
     lockMotion();
     state["angle"] = angle;
     state["target"] = target;
+    state["scale"] = scaleReading();
+    state["scaleTarget"] = scaleTarget;
+    state["scaleValid"] = sensorOK && calibrated;
+    state["scaleZeroSaved"] = scaleZeroSaved;
+    state["scaleMessage"] = scaleMessage;
     state["sensor"] = sensorOK;
     state["calibrated"] = calibrated;
     state["moving"] = moving;
@@ -549,7 +569,7 @@ void setupWeb() {
     state["calibrationText"] = calibrationText;
     state["msLeft"] = msPerDegree[0];
     state["msRight"] = msPerDegree[1];
-    state["version"] = "3.3";
+    state["version"] = "4.0";
     state["fault"] = motionFault;
     state["faultReason"] = motionFaultReason;
     state["faultText"] = motionFaultText;
@@ -578,7 +598,8 @@ void setupWeb() {
     if (!validToken()) { web.send(403, "text/plain", "Odswiez strone."); return; }
     const String action = web.arg("action");
     float destination = 0, speed = 0, accel = 0;
-    const bool validMove = parseNumber(web.arg("angle"), destination) && destination >= 0 && destination <= 360;
+    const bool validMove = parseNumber(web.arg("scale"), destination) && destination >= 0 && destination <= 10 &&
+                           fabsf(destination * 10 - roundf(destination * 10)) < 0.001f;
     const bool validTuning = parseNumber(web.arg("speed"), speed) && speed >= 1 && speed <= 12 &&
                              parseNumber(web.arg("accel"), accel) && accel >= 1 && accel <= 120;
     bool ok = false;
@@ -603,6 +624,9 @@ void setupWeb() {
     } else if (action == "calleft" || action == "calright") {
       if (moving || liftCommand) responseText = "Najpierw STOP obu napedow.";
       else if (!sensorOK) responseText = encoderFaultText();
+      else if (calibrated && ((action == "calright" && position + 8 > fmaxf(0, scaleSpan)) ||
+                             (action == "calleft" && position - 8 < fminf(0, scaleSpan))))
+        responseText = "Brak wolnego miejsca w zapisanym zakresie na test impulsow.";
       else {
         clearMotionFault();
         calDirection = action == "calright" ? 1 : -1;
@@ -651,9 +675,9 @@ void setupWeb() {
         ok = true;
       }
     } else if (action == "move") {
-      if (!validMove) responseText = "Wpisz kat od 0 do 360 stopni.";
+      if (!validMove) responseText = "Wpisz pozycje od 0 do 10, co 0,1.";
       else if (moving) responseText = "Klapka jest w ruchu. Zatrzymaj ja przed zadaniem nowej pozycji.";
-      else if (!calibrated) responseText = "Brak zapisanego zera. Ustaw mechanizm i zapisz pozycje zerowa.";
+      else if (!calibrated) responseText = "Zapisz oba konce skali: najpierw 0, nastepnie 10.";
       else if (!sensorOK) responseText = encoderFaultText();
       else {
         ok = startFlap(destination, WEB_OWNER, web.client().localIP() == ethernetIP);
@@ -674,16 +698,18 @@ void setupWeb() {
         ok = saveTuning();
         responseText = ok ? "Parametry zapisane w pamieci." : "Nie udalo sie zapisac parametrow w pamieci NVS.";
       }
-    } else if (action == "zero") {
-      if (moving || liftCommand) responseText = "Zatrzymaj oba napedy przed zapisaniem zera.";
-      else if (!sensorOK) responseText = encoderFaultText();
+    } else if (action == "zero" || action == "ten") {
+      if (moving || liftCommand) responseText = "Zatrzymaj oba napedy przed zapisem punktu skali.";
       else {
-        char zero[] = "ZERO";
-        motionCommand(zero);
-        ok = sensorOK && calibrated && motionFault != 3;
-        responseText = ok ? "Zapisano pozycje zerowa." : (sensorOK ? motionFaultText : encoderFaultText());
+        sensorOK = readEncoder();
+        if (!sensorOK) responseText = encoderFaultText();
+        else {
+          ok = action == "zero" ? saveScaleZero() : saveScaleTen();
+          responseText = motionFault == 3 ? motionFaultText : scaleMessage;
+        }
       }
     }
+
     unlockMotion();
     web.send(ok ? 200 : 409, "text/plain; charset=utf-8", responseText);
   });
@@ -814,8 +840,7 @@ void setup() {
   Wire.setClock(100000);
   Wire.setTimeOut(20);
   settings.begin("flap-test", false);
-  zeroAngle = settings.getUInt("zero", 0);
-  calibrated = settings.isKey("zero") && zeroAngle <= 4095;
+  loadScaleCalibration();
   float tuning[2];
   if (settings.getBytes("tuning", tuning, sizeof(tuning)) == sizeof(tuning) &&
       isfinite(tuning[0]) && tuning[0] >= 1 && tuning[0] <= 12 &&
@@ -857,9 +882,9 @@ void setup() {
     ArduinoOTA.onEnd([]() { Serial.println("Arduino OTA: gotowe."); });
     ArduinoOTA.onError([](ota_error_t) { endFailedMaintenance(); Serial.println("Arduino OTA: blad."); });
   }
-  Serial.println("WT32 L298N + AS5600 v3.3 / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
+  Serial.println("WT32 L298N + AS5600 v4.0 / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
   Serial.println("AS5600 SDA17 SCL5; L298N IN1=32 IN2=33 IN3=14 IN4=4.");
-  Serial.println("Nowy ESP wymaga ZERO. USB 115200: kat, ZERO, SPEED, ACCEL, SAVE, STOP, STATUS.");
+  Serial.println("Skala 0-10 wymaga zapisania ZERO i TEN. USB 115200: pozycja 0..10, ZERO, TEN, STOP, STATUS.");
 }
 
 void loop() {
