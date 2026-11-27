@@ -1,5 +1,5 @@
 # WT32-ETH01 — klapka 0–10, L298N, AS5600, rynna
-Firmware v4.0. Ethernet 192.168.1.13/24, brama 192.168.1.1.
+Firmware v4.1. Ethernet 192.168.1.13/24, brama 192.168.1.1.
 Wi-Fi DHCP. Modbus TCP port 502, Unit 1. WWW i OTA port 80.
 
 ## Podlaczenie — bez zmian
@@ -82,7 +82,7 @@ Partition Scheme: Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS), min_spiffs.
 Szkic > Eksportuj skompilowany program, a nastepnie otworz
 http://192.168.1.13/update i wgraj WT32_L298N_AS5600.ino.bin.
 Nie wgrywaj merged.bin, bootloader.bin ani partitions.bin przez OTA.
-Po restarcie http://192.168.1.13/ i Ctrl+F5; naglowek ma v4.0.
+Po restarcie http://192.168.1.13/ i Ctrl+F5; naglowek ma v4.1.
 ArduinoOTA rowniez dostepne, host suszarnia-klapka, to samo haslo.
 Pierwsze wgranie i zmiana partycji przez USB-UART.
 OTA zatrzymuje oba napedy; po restarcie nie wznawia ruchu.
@@ -101,7 +101,7 @@ a nie stopnie. Rejestry rynny pozostaja bez zmian.
 | 2 | R | Aktualny PWM rynny |
 | 3 | R | Aktualny kierunek rynny |
 | 4 | R | Rynna odblokowana po STOP |
-| 5 | R | Wersja 400 |
+| 5 | R | Wersja 410 |
 | 6 | RW | Cel klapki 0..100: 25 oznacza 2,5 |
 | 7 | W | 0 STOP klapki, 1 jedz do rejestru 6, 2 zapisz 0, 3 zapisz stare tuning, 4 zapisz 10 |
 | 8 | R | Pozycja skali x10, ograniczona do 0..100; 65535 gdy brak kalibracji/odczytu |
@@ -134,3 +134,32 @@ pola angle/target dla diagnostyki; nowe scale/scaleTarget sa jednostkami skali.
 Polecenie WWW move przyjmuje pole scale, nie stare angle.
 STOP zachowuje ostatni blad; nowe przyjete polecenie lub poprawny zapis
 punktu skali go kasuje. Blad nie jest zapisywany przez restart.
+
+
+## v4.1 — odzyskiwanie sieci i diagnostyka
+Nie potwierdzono jeszcze przyczyny zgloszonego zawieszania po dlugim czasie.
+Ta wersja usuwa brak limitu czasu w odpytywaniu WWW i brak ponownego
+uruchomienia serwerow po zmianie stanu podstawowego interfejsu.
+
+- Kazde zapytanie strony ma 2 s limitu, lacznie z pobraniem calej odpowiedzi.
+  Kolejne odpytywanie ponawia sie automatycznie. Ruch nie jest ponawiany.
+- Po restarcie ESP strona rozpoznaje nowe uruchomienie i przeladowuje token.
+- HTTP zamyka polaczenie po odpowiedzi. Bezczynne sesje Modbus sa zwalniane
+  po 30 s bez odebranych danych; istniejace heartbeat/ruch maja krotsze limity.
+- Utrata lub odzyskanie Ethernetu ponownie uruchamia WWW/Modbus/ArduinoOTA,
+  zamyka stare sesje i zatrzymuje napedy. Gdy Ethernet nie dziala, analogicznie
+  obslugiwane jest Wi-Fi. Zmiany Wi-Fi przy zdrowym Ethernet nie resetuja serwerow.
+- Dwa zadania (siec i sterowanie silnikow) sa nadzorowane watchdogiem 15 s.
+  Brak postepu ktoregos zadania powoduje restart; po starcie napedy sa wylaczone.
+  Przesylanie OTA odswieza watchdog w trakcie postepu, nie wylacza nadzoru.
+- Diagnostyka na stronie: czas pracy, powod ostatniego resetu (w tym brownout
+  i watchdog), licznik utrat Ethernetu, uruchomien serwerow, wolna/minimalna
+  pamiec, najwiekszy wolny blok, stan watchdogow, wiek obiegu sterowania.
+  Liczniki sieci i pamiec minimalna dotycza biezacego uruchomienia.
+
+Kalibracja 0/10 i mapa Modbus poza numerem wersji 410 pozostaja bez zmian.
+Watchdog nie rozpoznaje wszystkich awarii PHY/switcha ani braku odpowiedzi
+samego stosu sieciowego, jesli petla programu nadal dziala.
+Nie dodano restartow okresowych ani restartow z powodu braku klienta.
+Konieczna jest dluzsza proba na fizycznej plytce. W razie awarii sprawdz
+ping 192.168.1.13 i lampki RJ45; po powrocie zachowaj dane diagnostyczne.
