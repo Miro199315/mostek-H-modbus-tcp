@@ -7,6 +7,10 @@
 #include <ArduinoOTA.h>
 #include <Update.h>
 #include <ArduinoJson.h>
+#include <esp_task_wdt.h>
+#include <esp_system.h>
+#include <esp_heap_caps.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -29,7 +33,7 @@
 #define DRYER_WIFI_NETWORKS "[]"
 #endif
 
-constexpr uint16_t FIRMWARE_VERSION = 400;
+constexpr uint16_t FIRMWARE_VERSION = 410;
 constexpr unsigned CLIENT_COUNT = 3;
 constexpr int NO_OWNER = -1, WEB_OWNER = 100, USB_OWNER = 101;
 constexpr uint32_t LEASE_MS = 1500;
@@ -47,7 +51,7 @@ struct ModbusSession {
   NetworkClient client;
   uint8_t buffer[260] = {};
   size_t used = 0;
-  uint32_t frameAt = 0;
+  uint32_t frameAt = 0, lastActivity = 0;
   bool ethernet = false;
 };
 ModbusSession sessions[CLIENT_COUNT];
@@ -61,6 +65,43 @@ WifiEntry networks[6];
 unsigned networkCount = 0, networkIndex = 0;
 bool wifiAttempted = false, wifiReported = false;
 uint32_t wifiAttemptAt = 0;
+bool watchdogReady = false, mainWatchdog = false, controlWatchdog = false;
+uint32_t bootId = 0, ethernetDrops = 0, wifiDrops = 0, serverRestarts = 0;
+uint32_t lastControlAt = 0;
+bool previousEthernet = false, previousWireless = false;
+
+const char* resetReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "Wlaczenie zasilania";
+    case ESP_RST_BROWNOUT: return "Spadek napiecia zasilania (brownout)";
+    case ESP_RST_TASK_WDT: return "Watchdog zadania: brak postepu programu";
+    case ESP_RST_INT_WDT: return "Watchdog przerwan";
+    case ESP_RST_WDT: return "Watchdog sprzetowy";
+    case ESP_RST_PANIC: return "Blad programu (panic)";
+    case ESP_RST_SW: return "Restart programowy / OTA";
+    case ESP_RST_EXT: return "Reset zewnetrzny";
+    default: return "Inna przyczyna resetu";
+  }
+}
+
+void feedMainWatchdog() {
+  if (mainWatchdog) esp_task_wdt_reset();
+}
+
+void setupWatchdog() {
+  esp_task_wdt_config_t config{};
+  config.timeout_ms = 15000;
+  config.idle_core_mask = 0;
+  config.trigger_panic = true;
+  esp_err_t result = esp_task_wdt_init(&config);
+  if (result == ESP_ERR_INVALID_STATE) result = esp_task_wdt_reconfigure(&config);
+  watchdogReady = result == ESP_OK;
+  if (watchdogReady) {
+    mainWatchdog = esp_task_wdt_status(nullptr) == ESP_OK ||
+                   esp_task_wdt_add(nullptr) == ESP_OK;
+  }
+  Serial.printf("Watchdog 15 s: %s\n", mainWatchdog ? "aktywny" : "BLAD");
+}
 
 void lockMotion() { xSemaphoreTake(motionMutex, portMAX_DELAY); }
 void unlockMotion() { xSemaphoreGive(motionMutex); }
@@ -89,6 +130,7 @@ bool ownerOnline(bool ethernet) { return ethernet ? ethOnline : wifiOnline; }
 // All I2C and motor state is owned by this task or accessed under motionMutex.
 // It continues monitoring motor leases while synchronous HTTP handles a slow client.
 void controlTask(void*) {
+  controlWatchdog = watchdogReady && esp_task_wdt_add(nullptr) == ESP_OK;
   for (;;) {
     lockMotion();
     const uint32_t now = millis();
@@ -131,7 +173,9 @@ void controlTask(void*) {
         liftActual = 0;
       }
     }
+    lastControlAt = millis();
     unlockMotion();
+    if (controlWatchdog) esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -316,7 +360,8 @@ void handleRequest(unsigned index, size_t total) {
 void serviceModbus() {
   if (!serverStarted) return;
   for (unsigned i = 0; i < CLIENT_COUNT; ++i) {
-    if (sessions[i].client && !sessions[i].client.connected()) closeSession(i);
+    if (sessions[i].client && (!sessions[i].client.connected() ||
+        millis() - sessions[i].lastActivity >= 30000)) closeSession(i);
   }
   NetworkClient incoming = modbusServer.accept();
   if (incoming) {
@@ -326,6 +371,8 @@ void serviceModbus() {
         closeSession(i);
         sessions[i].client = incoming;
         sessions[i].client.setNoDelay(true);
+        sessions[i].client.setConnectionTimeout(250);
+        sessions[i].lastActivity = millis();
         sessions[i].ethernet = incoming.localIP() == ethernetIP;
         accepted = true;
         break;
@@ -339,6 +386,7 @@ void serviceModbus() {
       if (session.used == 0) session.frameAt = millis();
       const int byte = session.client.read();
       if (byte < 0) break;
+      session.lastActivity = millis();
       session.buffer[session.used++] = byte;
       if (session.used >= 6) {
         const uint16_t length = get16(session.buffer + 4);
@@ -354,6 +402,39 @@ void serviceModbus() {
   }
 }
 
+void serviceNetworkLifecycle(bool ethernet, bool wireless) {
+  const bool changed = ethernet != previousEthernet || (!ethernet && wireless != previousWireless);
+  if (previousEthernet && !ethernet) ++ethernetDrops;
+  if (previousWireless && !wireless) ++wifiDrops;
+  const bool anyOnline = ethernet || wireless;
+  if (serverStarted && (changed || !anyOnline)) {
+    lockMotion();
+    haltAll();
+    unlockMotion();
+    for (unsigned i = 0; i < CLIENT_COUNT; ++i) closeSession(i);
+    web.client().stop();
+    web.stop();
+    modbusServer.end();
+    if (otaStarted) { ArduinoOTA.end(); otaStarted = false; }
+    serverStarted = false;
+  }
+  previousEthernet = ethernet;
+  previousWireless = wireless;
+  if (anyOnline && !serverStarted) {
+    modbusServer.begin();
+    web.begin();
+    serverStarted = true;
+    ++serverRestarts;
+    if (strlen(DRYER_BOOTSTRAP_OTA_PASSWORD) &&
+        strcmp(DRYER_BOOTSTRAP_OTA_PASSWORD, "CHANGE_ME")) {
+      ArduinoOTA.begin();
+      otaStarted = true;
+    }
+    Serial.printf("Serwery start #%lu ETH=%d WiFi=%d\n",
+                  (unsigned long)serverRestarts, ethernet, wireless);
+  }
+}
+
 bool passwordConfigured() {
   return strlen(DRYER_BOOTSTRAP_OTA_PASSWORD) > 0 && strcmp(DRYER_BOOTSTRAP_OTA_PASSWORD, "CHANGE_ME") != 0;
 }
@@ -361,6 +442,7 @@ bool passwordConfigured() {
 bool authenticated() { return passwordConfigured() && web.authenticate("admin", DRYER_BOOTSTRAP_OTA_PASSWORD); }
 
 bool requireLogin() {
+  web.sendHeader("Connection", "close");
   if (!passwordConfigured()) {
     web.send(503, "text/plain", "Ustaw haslo DRYER_BOOTSTRAP_OTA_PASSWORD w secrets.h.");
     return false;
@@ -390,7 +472,7 @@ void endFailedMaintenance() {
 const char CONTROL_PAGE[] PROGMEM = R"html(<!doctype html><html lang="pl"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Klapka suszarni</title>
 <style>body{font:17px system-ui;margin:24px auto;padding:0 16px;max-width:600px;background:#f5f6f4;color:#183426}section{background:white;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,button{font:inherit;padding:10px;box-sizing:border-box;max-width:100%}input{width:150px}button{cursor:pointer;margin:4px;background:#1c6042;color:white;border:0;border-radius:6px}#stop{background:#ad302a}#state{white-space:pre-line}#message{min-height:28px}#faultBox{background:#fff0ed;border:2px solid #ad302a;color:#76241d;padding:16px;border-radius:8px;margin-top:16px}#faultBox p{margin:8px 0}#faultDetails{font-size:14px}a{color:#1c6042}</style>
-<h1>Klapka suszarni <small>v4.0</small></h1><section><div id="state">Laczenie...</div>
+<h1>Klapka suszarni <small>v4.1</small></h1><section><div id="state">Laczenie...</div>
 <div id="faultBox" role="alert" hidden><strong id="faultText"></strong><p id="faultHint"></p><p id="faultDetails"></p></div></section>
 <section><label>Pozycja zadana [0–10] <input id="angle" type="number" min="0" max="10" step="0.1" value="5"></label>
 <button onclick="act('move')">Ustaw pozycje</button><button id="stop" onclick="act('stop')">STOP obu napedow</button>
@@ -415,12 +497,35 @@ const char CONTROL_PAGE[] PROGMEM = R"html(<!doctype html><html lang="pl"><meta 
 <label hidden>Moc [%] <input id="power" type="number" min="1" max="100" value="100"></label>
 <button class="jog" data-direction="-1" style="touch-action:none">Przytrzymaj: LEWO</button>
 <button class="jog" data-direction="1" style="touch-action:none">Przytrzymaj: PRAWO</button>
-<p id="message" role="status"></p></section><p><a href="/update">Aktualizacja programu OTA</a></p>
+<p id="message" role="status"></p></section>
+<section><details><summary>Diagnostyka polaczenia</summary><p id="networkDiag" style="white-space:pre-line"></p></details></section><p><a href="/update">Aktualizacja programu OTA</a></p>
 <script>
 const token = '__TOKEN__';
 let alive = false;
 let busy = false;
 let loaded = false;
+let loadedBootId = null;
+async function requestText(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
+  try {
+    const response = await fetch(url, {...options, signal: controller.signal});
+    const body = await response.text();
+    if (response.status === 403) {
+      alive = false;
+      endJog();
+      location.reload();
+      throw Error('Sterownik wymaga odswiezenia strony.');
+    }
+    if (!response.ok) throw Error(body || 'Blad odpowiedzi sterownika.');
+    return body;
+  } catch (error) {
+    if (error.name === 'AbortError') throw Error('Brak odpowiedzi przez 2 s. Ponawiam polaczenie...');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function post(action, extra = {}) {
   const data = new URLSearchParams({
@@ -431,10 +536,7 @@ async function post(action, extra = {}) {
     speed: document.querySelector('#speed').value,
     accel: document.querySelector('#accel').value
   });
-  const response = await fetch('/api/control', {method: 'POST', body: data});
-  const text = await response.text();
-  if (!response.ok) throw Error(text);
-  return text;
+  return requestText('/api/control', {method: 'POST', body: data});
 }
 
 async function act(action) {
@@ -453,9 +555,14 @@ async function poll() {
   busy = true;
   try {
     if (alive) await post('heartbeat');
-    const response = await fetch('/api/status', {cache: 'no-store'});
-    if (!response.ok) throw Error('Brak odpowiedzi sterownika');
-    const state = await response.json();
+    const state = JSON.parse(await requestText('/api/status', {cache: 'no-store'}));
+    if (loadedBootId !== null && loadedBootId !== state.bootId) {
+      alive = false;
+      endJog();
+      location.reload();
+      return;
+    }
+    loadedBootId = state.bootId;
     alive = state.moving && state.webOwner;
     document.querySelector('#state').textContent = [
       `Tryb: ${state.manual ? "TEST BEZ ENKODERA" : "pozycjonowanie"}`,
@@ -467,6 +574,18 @@ async function poll() {
       `Wyjscia: ${state.ready ? 'gotowe' : 'BLAD'} | OTA: ${state.maintenance ? 'aktualizacja' : 'postoj'}`,
       `Rynna: ${state.lift}`,
       `Ethernet: ${state.eth} | Wi-Fi: ${state.wifi}`
+    ].join('\n');
+    document.querySelector('#networkDiag').textContent = [
+      'Czas pracy: ' + Math.floor(state.uptimeSeconds / 60) + ' min',
+      'Ostatni restart: ' + state.resetReason,
+      'Ethernet: ' + (state.ethOnline ? 'polaczony' : 'brak polaczenia') +
+        ' | utraty: ' + state.ethernetDrops,
+      'Ponowne uruchomienia serwerow: ' + state.serverRestarts,
+      'Wolna pamiec: ' + state.freeHeap + ' B | minimum: ' + state.minHeap + ' B',
+      'Najwiekszy wolny blok: ' + state.largestBlock + ' B',
+      'Watchdog: siec ' + (state.mainWatchdog ? 'OK' : 'BLAD') +
+        ', silniki ' + (state.controlWatchdog ? 'OK' : 'BLAD'),
+      'Ostatni obieg sterowania: ' + state.controlAgeMs + ' ms temu'
     ].join('\n');
     document.querySelector('#scaleInfo').textContent = state.scaleMessage;
     document.querySelector('#calibration').textContent = state.calibrationText +
@@ -553,7 +672,21 @@ void setupWeb() {
   web.on("/api/status", HTTP_GET, []() {
     if (!requireLogin()) return;
     JsonDocument state;
+    state["uptimeSeconds"] = uint64_t(esp_timer_get_time() / 1000000);
+    state["resetReason"] = resetReasonText();
+    state["bootId"] = bootId;
+    state["ethernetDrops"] = ethernetDrops;
+    state["wifiDrops"] = wifiDrops;
+    state["serverRestarts"] = serverRestarts;
+    state["freeHeap"] = ESP.getFreeHeap();
+    state["minHeap"] = ESP.getMinFreeHeap();
+    state["largestBlock"] = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    state["mainWatchdog"] = mainWatchdog;
     lockMotion();
+    state["controlWatchdog"] = controlWatchdog;
+    state["controlAgeMs"] = millis() - lastControlAt;
+    state["ethOnline"] = ethOnline;
+    state["wifiOnline"] = wifiOnline;
     state["angle"] = angle;
     state["target"] = target;
     state["scale"] = scaleReading();
@@ -569,7 +702,7 @@ void setupWeb() {
     state["calibrationText"] = calibrationText;
     state["msLeft"] = msPerDegree[0];
     state["msRight"] = msPerDegree[1];
-    state["version"] = "4.0";
+    state["version"] = "4.1";
     state["fault"] = motionFault;
     state["faultReason"] = motionFaultReason;
     state["faultText"] = motionFaultText;
@@ -735,6 +868,7 @@ void setupWeb() {
       web.send(500, "text/plain", "Aktualizacja nieudana. Napedy zatrzymane. Wyslij nowe polecenie po sprawdzeniu sterownika.");
     }
   }, []() {
+    feedMainWatchdog();
     HTTPUpload& upload = web.upload();
     if (upload.status == UPLOAD_FILE_START) {
       uploadAccepted = authenticated() && validToken();
@@ -758,7 +892,7 @@ void setupWeb() {
       endFailedMaintenance();
     }
   });
-  web.onNotFound([]() { web.send(404, "text/plain", "Nie znaleziono."); });
+  web.onNotFound([]() { web.sendHeader("Connection", "close"); web.send(404, "text/plain", "Nie znaleziono."); });
 }
 
 void addWifi(const char* ssid, const char* password) {
@@ -831,6 +965,8 @@ void setup() {
   const int pins[] = {FLAP_A, FLAP_B, LIFT_A, LIFT_B};
   for (int pin : pins) { digitalWrite(pin, LOW); pinMode(pin, OUTPUT); }
   Serial.begin(115200);
+  bootId = esp_random();
+  Serial.println(resetReasonText());
   motionMutex = xSemaphoreCreateMutex();
   if (!motionMutex) { Serial.println("Blad mutex. Napedy wylaczone."); for (;;) delay(1000); }
   bool pwmOK = true;
@@ -863,6 +999,7 @@ void setup() {
   sensorOK = readEncoder();
   driverReady = pwmOK;
   if (!pwmOK) recordMotionFault(1, 13, "Nie udalo sie uruchomic wyjsc PWM.", "Sprawdz wybor plytki i konfiguracje GPIO. Napedy pozostaja zatrzymane.");
+  setupWatchdog();
   if (xTaskCreatePinnedToCore(controlTask, "motion", 8192, nullptr, 2, nullptr, 1) != pdPASS) {
     driverReady = false;
     haltAll();
@@ -879,15 +1016,17 @@ void setup() {
     ArduinoOTA.setHostname("suszarnia-klapka");
     ArduinoOTA.setPassword(DRYER_BOOTSTRAP_OTA_PASSWORD);
     ArduinoOTA.onStart([]() { beginMaintenance(); Serial.println("Arduino OTA: start."); });
+    ArduinoOTA.onProgress([](unsigned int, unsigned int) { feedMainWatchdog(); });
     ArduinoOTA.onEnd([]() { Serial.println("Arduino OTA: gotowe."); });
     ArduinoOTA.onError([](ota_error_t) { endFailedMaintenance(); Serial.println("Arduino OTA: blad."); });
   }
-  Serial.println("WT32 L298N + AS5600 v4.0 / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
+  Serial.println("WT32 L298N + AS5600 v4.1 / 192.168.1.13:502 unit 1 / WWW i OTA port 80");
   Serial.println("AS5600 SDA17 SCL5; L298N IN1=32 IN2=33 IN3=14 IN4=4.");
   Serial.println("Skala 0-10 wymaga zapisania ZERO i TEN. USB 115200: pozycja 0..10, ZERO, TEN, STOP, STATUS.");
 }
 
 void loop() {
+  feedMainWatchdog();
   const bool ethernet = ETH.hasIP() && ETH.linkUp();
   const bool wireless = WiFi.status() == WL_CONNECTED;
   lockMotion();
@@ -895,13 +1034,7 @@ void loop() {
   wifiOnline = wireless;
   const bool busy = maintenance;
   unlockMotion();
-  if ((ethernet || wireless) && !serverStarted) {
-    modbusServer.begin();
-    web.begin();
-    serverStarted = true;
-    if (passwordConfigured()) { ArduinoOTA.begin(); otaStarted = true; }
-    Serial.print("Ethernet IP: "); Serial.println(ETH.localIP());
-  }
+  if (!busy && !rebootPending) serviceNetworkLifecycle(ethernet, wireless);
   if (!busy && !rebootPending) serviceModbus();
   serviceSerial();
   serviceWifi();
@@ -918,5 +1051,6 @@ void loop() {
     lockMotion(); haltAll(); unlockMotion();
     ESP.restart();
   }
+  feedMainWatchdog();
   delay(1);
 }
